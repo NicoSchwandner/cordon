@@ -2,6 +2,7 @@
 server
 cordon-server
 *.exe
+tmp/
 
 # Frontend
 node_modules/

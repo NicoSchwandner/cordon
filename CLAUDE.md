@@ -4,20 +4,15 @@ Zero-trust developer environment. Go backend + SvelteKit frontend.
 
 ## Build & Test
 
+All commands are available via `make`. Run `make help` for the full list.
+
 ```bash
-# Go (from repo root)
-go build ./...                           # compile all
-go test ./... -short                     # unit + arch tests (skip testcontainers)
-go test ./internal/infrastructure/postgres/... -v  # integration tests (needs Docker)
-go test ./e2e/... -tags=e2e -v           # E2E tests (needs docker compose stack)
-
-# Frontend (from web/)
-cd web && npm install && npm run dev     # dev server (proxies to :8443)
-cd web && npm run build                  # production build
-cd web && npx svelte-check               # type checking
-
-# Full stack
-docker compose up -d --build             # postgres + migrations + Go server on :8443
+make install-tools     # one-time: install air (Go hot reload) + npm deps
+make dev               # full dev stack: postgres + Go (hot reload) + Vite (HMR)
+make test              # unit + arch tests (Go + frontend types)
+make test-integration  # integration tests (testcontainers, needs Docker)
+make test-e2e          # E2E (spins up full stack, runs tests, tears down)
+make stop              # stop all services
 ```
 
 ## Project Structure

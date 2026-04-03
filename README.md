@@ -45,15 +45,11 @@ graph TD
 ## Quick Start
 
 ```bash
-# Full stack (Postgres + migrations + Go server)
-docker compose up -d --build
-
-# Frontend
-cd web && npm install && npm run dev
-
-# Verify
-curl http://localhost:8443/health
+make install-tools                # one-time: install air (Go hot reload) + npm deps
+make dev                          # start everything: postgres + Go (hot reload) + Vite (HMR)
 ```
+
+Opens at http://localhost:5173 (frontend) proxying to http://localhost:8443 (API).
 
 ```bash
 # Tier 1 — allowed
@@ -133,13 +129,28 @@ graph LR
 
 Each layer may only depend on layers to its **left**. Violations fail the build.
 
-## Testing
+## Make Targets
 
-```bash
-go test ./... -short                               # Unit + arch tests
-go test ./internal/infrastructure/postgres/... -v  # Integration (testcontainers)
-go test ./e2e/... -tags=e2e -v                     # E2E (needs docker compose)
-cd web && npx svelte-check                         # Frontend type checking
+```
+make dev                Full dev stack (postgres + Go hot reload + Vite HMR)
+make dev-db             Start only postgres + run migrations
+make dev-server         Go server with hot reload (assumes postgres)
+make dev-web            Vite dev server with HMR
+make stop               Stop all services
+
+make build              Build Go binaries
+make build-web          Build frontend for production
+make build-docker       Build Docker image
+
+make test               Unit + arch tests (Go + frontend types)
+make test-go            Go tests only
+make test-integration   Integration tests (testcontainers)
+make test-e2e           Full E2E (spins up docker compose, runs tests, tears down)
+make check              Frontend type checking
+
+make clean              Remove build artifacts
+make install-tools      Install air + npm deps
+make migrate            Run database migrations
 ```
 
 ## Design Decisions
