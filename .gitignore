@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+~/.cordon/
+server
+web/.svelte-kit/
+web/build/

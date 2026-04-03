@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS audit_entries;
+DROP ROLE IF EXISTS zt_app;

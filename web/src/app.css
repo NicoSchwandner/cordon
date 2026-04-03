@@ -1,0 +1,197 @@
+@import "tailwindcss";
+@import "xterm/css/xterm.css";
+
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-SemiBold.woff2") format("woff2");
+  font-weight: 600;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Geist";
+  src: url("/fonts/Geist-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+body {
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background-color: var(--color-primary);
+  color: var(--color-on-primary);
+}
+
+@theme {
+  --font-sans:
+    "Geist", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+
+  /* ── Core surfaces ── */
+  --color-page: #f8f9fb;
+  --color-surface: #ffffff;
+  --color-surface-raised: #ffffff;
+  --color-surface-inset: #f8f9fb;
+
+  /* ── Text ── */
+  --color-foreground: #111827;
+  --color-foreground-secondary: #374151;
+  --color-foreground-tertiary: #4b5563;
+  --color-foreground-muted: #6b7280;
+  --color-foreground-faint: #9ca3af;
+
+  /* ── Borders ── */
+  --color-border: #e5e7eb;
+  --color-border-input: #d1d5db;
+  --color-border-subtle: #f3f4f6;
+
+  /* ── Interactive ── */
+  --color-primary: #111827;
+  --color-primary-hover: #1f2937;
+  --color-on-primary: #ffffff;
+  --color-ring: #111827;
+  --color-hover-subtle: #f9fafb;
+  --color-skeleton: #e5e7eb;
+
+  /* ── Sidebar ── */
+  --color-sidebar: #f0f1f5;
+  --color-sidebar-hover: #e6e8ed;
+  --color-sidebar-active: #e1e3e9;
+  --color-sidebar-border: #e1e3e9;
+
+  /* ── Spinner ── */
+  --color-spinner-track: #e5e7eb;
+  --color-spinner-fill: #111827;
+
+  /* ── Status: danger ── */
+  --color-danger-bg: #fef2f2;
+  --color-danger-text: #b91c1c;
+  --color-danger-border: #fecaca;
+  --color-danger-solid: #dc2626;
+  --color-danger-solid-hover: #b91c1c;
+  --color-on-danger: #ffffff;
+
+  /* ── Status: success ── */
+  --color-success-bg: #f0fdf4;
+  --color-success-text: #15803d;
+  --color-success-border: #bbf7d0;
+  --color-success-badge-bg: #dcfce7;
+
+  /* ── Status: warning ── */
+  --color-warning-bg: #fefce8;
+  --color-warning-text: #a16207;
+  --color-warning-border: #fef08a;
+  --color-warning-solid: #ca8a04;
+  --color-warning-solid-hover: #a16207;
+  --color-warning-badge-bg: #fef9c3;
+  --color-on-warning: #ffffff;
+
+  /* ── Status: info ── */
+  --color-info-bg: #eff6ff;
+  --color-info-text: #1d4ed8;
+  --color-info-border: #bfdbfe;
+
+  /* ── Links ── */
+  --color-link-action: #2563eb;
+}
+
+.dark {
+  --color-page: #18181b;
+  --color-surface: #27272a;
+  --color-surface-raised: #3f3f46;
+  --color-surface-inset: #111113;
+
+  --color-foreground: #fafafa;
+  --color-foreground-secondary: #d4d4d8;
+  --color-foreground-tertiary: #a1a1aa;
+  --color-foreground-muted: #a1a1aa;
+  --color-foreground-faint: #71717a;
+
+  --color-border: #3f3f46;
+  --color-border-input: #52525b;
+  --color-border-subtle: #27272a;
+
+  --color-primary: #fafafa;
+  --color-primary-hover: #e4e4e7;
+  --color-on-primary: #18181b;
+  --color-ring: #a1a1aa;
+  --color-hover-subtle: #27272a;
+  --color-skeleton: #3f3f46;
+
+  --color-sidebar: #111113;
+  --color-sidebar-hover: #1c1c1f;
+  --color-sidebar-active: #27272a;
+  --color-sidebar-border: #27272a;
+
+  --color-spinner-track: #3f3f46;
+  --color-spinner-fill: #fafafa;
+
+  --color-danger-bg: #450a0a;
+  --color-danger-text: #fca5a5;
+  --color-danger-border: #7f1d1d;
+  --color-danger-solid: #ef4444;
+  --color-danger-solid-hover: #dc2626;
+  --color-on-danger: #ffffff;
+
+  --color-success-bg: #052e16;
+  --color-success-text: #86efac;
+  --color-success-border: #14532d;
+  --color-success-badge-bg: #14532d;
+
+  --color-warning-bg: #422006;
+  --color-warning-text: #fde047;
+  --color-warning-border: #713f12;
+  --color-warning-badge-bg: #713f12;
+  --color-warning-solid: #d97706;
+  --color-warning-solid-hover: #b45309;
+  --color-on-warning: #ffffff;
+
+  --color-info-bg: #172554;
+  --color-info-text: #93c5fd;
+  --color-info-border: #1e3a5f;
+
+  --color-link-action: #60a5fa;
+}
+
+button {
+  cursor: pointer;
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-out;
+}

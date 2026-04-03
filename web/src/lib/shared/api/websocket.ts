@@ -1,0 +1,106 @@
+import type { AuditEntry, ApprovalRequest } from "./types";
+
+type CleanupFn = () => void;
+
+function wsUrl(path: string): string {
+  if (typeof window === "undefined") return "";
+  const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${proto}//${window.location.host}${path}`;
+}
+
+function createReconnectingWS(
+  path: string,
+  onMessage: (data: string) => void,
+  onOpen?: () => void,
+): CleanupFn {
+  let ws: WebSocket | null = null;
+  let delay = 1000;
+  let closed = false;
+  let timer: ReturnType<typeof setTimeout>;
+
+  function connect() {
+    if (closed) return;
+    ws = new WebSocket(wsUrl(path));
+
+    ws.onopen = () => {
+      delay = 1000;
+      onOpen?.();
+    };
+
+    ws.onmessage = (ev) => {
+      onMessage(ev.data);
+    };
+
+    ws.onclose = () => {
+      if (closed) return;
+      timer = setTimeout(() => {
+        delay = Math.min(delay * 2, 30000);
+        connect();
+      }, delay);
+    };
+
+    ws.onerror = () => ws?.close();
+  }
+
+  connect();
+
+  return () => {
+    closed = true;
+    clearTimeout(timer);
+    ws?.close();
+  };
+}
+
+export function connectAuditWS(
+  onEntry: (entry: AuditEntry) => void,
+): CleanupFn {
+  return createReconnectingWS("/ws/audit", (data) => {
+    try {
+      onEntry(JSON.parse(data));
+    } catch {
+      /* ignore parse errors */
+    }
+  });
+}
+
+export function connectApprovalsWS(
+  onRequest: (req: ApprovalRequest) => void,
+): CleanupFn {
+  return createReconnectingWS("/ws/approvals", (data) => {
+    try {
+      onRequest(JSON.parse(data));
+    } catch {
+      /* ignore parse errors */
+    }
+  });
+}
+
+export interface TerminalWS {
+  send: (data: string) => void;
+  resize: (cols: number, rows: number) => void;
+  onData: (cb: (data: string) => void) => void;
+  close: () => void;
+}
+
+export function connectTerminalWS(workspaceId: string): TerminalWS {
+  const url = wsUrl(`/ws/terminal/${workspaceId}`);
+  const ws = new WebSocket(url);
+  let dataCb: ((data: string) => void) | null = null;
+
+  ws.onmessage = (ev) => dataCb?.(ev.data);
+
+  return {
+    send: (data: string) => {
+      if (ws.readyState === WebSocket.OPEN) ws.send(data);
+    },
+    resize: (cols: number, rows: number) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      }
+    },
+    onData: (cb) => {
+      dataCb = cb;
+    },
+    close: () => ws.close(),
+  };
+}
