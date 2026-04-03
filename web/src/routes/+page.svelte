@@ -5,7 +5,7 @@
 	import StatusDot from '$lib/shared/components/StatusDot.svelte';
 	import { getContext } from 'svelte';
 	import { createWorkspace, getDefaultBranch } from '$lib/shared/api/client';
-	import type { WorkspaceResponse } from '$lib/shared/api/types';
+	import type { WorkspaceResponse, RepoConfig } from '$lib/shared/api/types';
 
 	const getHealthy = getContext<() => boolean | null>('healthy');
 	const healthy = $derived(getHealthy());
@@ -14,42 +14,70 @@
 
 	let showForm = $state(false);
 	let newName = $state('');
-	let newRepo = $state('');
-	let newBaseBranch = $state('');
-	let newBranch = $state('');
 	let creating = $state(false);
-	let detectedBranch = $state('');
-	let branchTimer: ReturnType<typeof setTimeout> | undefined;
 	let extraWorkspaces: WorkspaceResponse[] = $state([]);
 	const workspaces = $derived([...extraWorkspaces, ...data.workspaces]);
-	const hasRepo = $derived(newRepo.trim().length > 0);
 
-	$effect(() => {
-		const repo = newRepo.trim();
-		clearTimeout(branchTimer);
-		if (!repo) {
-			detectedBranch = '';
+	// Multi-repo form state
+	interface RepoRow {
+		url: string;
+		branch: string;
+		detectedBranch: string;
+	}
+
+	let repos = $state<RepoRow[]>([{ url: '', branch: '', detectedBranch: '' }]);
+	let branchTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
+
+	function addRepo() {
+		repos.push({ url: '', branch: '', detectedBranch: '' });
+	}
+
+	function removeRepo(index: number) {
+		repos.splice(index, 1);
+		branchTimers.delete(index);
+	}
+
+	function detectBranch(index: number) {
+		const timer = branchTimers.get(index);
+		if (timer) clearTimeout(timer);
+
+		const url = repos[index].url.trim();
+		if (!url) {
+			repos[index].detectedBranch = '';
 			return;
 		}
-		branchTimer = setTimeout(async () => {
-			try {
-				const result = await getDefaultBranch(repo);
-				detectedBranch = result.default_branch;
-			} catch {
-				detectedBranch = '';
-			}
-		}, 500);
-	});
+
+		branchTimers.set(
+			index,
+			setTimeout(async () => {
+				try {
+					const result = await getDefaultBranch(url);
+					repos[index].detectedBranch = result.default_branch;
+				} catch {
+					repos[index].detectedBranch = '';
+				}
+			}, 500)
+		);
+	}
+
+	const hasRepos = $derived(repos.some((r) => r.url.trim().length > 0));
+	const primaryRepo = $derived(repos.find((r) => r.url.trim().length > 0));
 
 	async function handleCreate() {
-		const name = newName.trim() || repoShortName(newRepo) || 'workspace';
+		const repoConfigs: RepoConfig[] = repos
+			.filter((r) => r.url.trim().length > 0)
+			.map((r, i) => ({
+				url: r.url.trim(),
+				branch: r.branch.trim() || undefined,
+				primary: i === 0
+			}));
+
+		const name = newName.trim() || repoShortName(primaryRepo?.url || '') || 'workspace';
 		creating = true;
 		try {
 			const req: import('$lib/shared/api/types').CreateWorkspaceRequest = { name };
-			if (newRepo.trim()) {
-				req.repo = newRepo.trim();
-				req.branch = newBranch.trim();
-				req.base_branch = newBaseBranch.trim() || detectedBranch || 'main';
+			if (repoConfigs.length > 0) {
+				req.repos = repoConfigs;
 			}
 			const ws = await createWorkspace(req);
 			window.location.href = `/workspace/${ws.id}`;
@@ -104,48 +132,66 @@
 				}}
 				class="mb-4 space-y-3 rounded-xl border border-border bg-surface p-4"
 			>
+				<!-- Repo rows -->
 				<div>
-					<label for="ws-repo" class="mb-1 block text-xs font-medium text-foreground-muted">Repository URL <span class="font-normal text-foreground-faint">(optional — leave empty for bare container)</span></label>
-					<input
-						id="ws-repo"
-						bind:value={newRepo}
-						placeholder="e.g. github.com/WintDev/Core"
-						class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
-					/>
-				</div>
-				{#if hasRepo}
-					<div class="grid gap-3 sm:grid-cols-2">
-						<div>
-							<label for="ws-base-branch" class="mb-1 block text-xs font-medium text-foreground-muted">Base branch <span class="font-normal text-foreground-faint">(devcontainer source)</span></label>
-							<input
-								id="ws-base-branch"
-								bind:value={newBaseBranch}
-								placeholder={detectedBranch || 'main'}
-								class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
-							/>
-						</div>
-						<div>
-							<label for="ws-branch" class="mb-1 block text-xs font-medium text-foreground-muted">Branch <span class="font-normal text-foreground-faint">(checkout in workspace)</span></label>
-							<input
-								id="ws-branch"
-								bind:value={newBranch}
-								required
-								placeholder="e.g. DEV-12345-my-feature"
-								class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
-							/>
-						</div>
+					<div class="mb-1 flex items-center justify-between">
+						<label class="block text-xs font-medium text-foreground-muted">Repositories <span class="font-normal text-foreground-faint">(optional — leave empty for bare container)</span></label>
 					</div>
-				{/if}
+					<div class="space-y-2">
+						{#each repos as repo, i}
+							<div class="flex items-start gap-2">
+								<div class="grid flex-1 gap-2 sm:grid-cols-2">
+									<div>
+										<input
+											bind:value={repo.url}
+											oninput={() => detectBranch(i)}
+											placeholder="e.g. github.com/WintDev/Core"
+											class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+										/>
+										{#if i === 0 && repos.filter(r => r.url.trim()).length > 1}
+											<span class="mt-0.5 block text-xs text-foreground-faint">primary (devcontainer source)</span>
+										{/if}
+									</div>
+									<input
+										bind:value={repo.branch}
+										placeholder={repo.detectedBranch || 'branch (auto-detect)'}
+										class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+									/>
+								</div>
+								{#if i > 0}
+									<button
+										type="button"
+										onclick={() => removeRepo(i)}
+										class="mt-2 text-foreground-faint transition-colors hover:text-danger-text"
+										title="Remove repo"
+									>
+										&times;
+									</button>
+								{:else}
+									<div class="w-4"></div>
+								{/if}
+							</div>
+						{/each}
+					</div>
+					<button
+						type="button"
+						onclick={addRepo}
+						class="mt-2 text-xs text-foreground-muted transition-colors hover:text-foreground"
+					>
+						+ Add another repo
+					</button>
+				</div>
+
 				<div>
-					<label for="ws-name" class="mb-1 block text-xs font-medium text-foreground-muted">Name <span class="font-normal text-foreground-faint">(auto-fills from repo if empty)</span></label>
+					<label for="ws-name" class="mb-1 block text-xs font-medium text-foreground-muted">Name <span class="font-normal text-foreground-faint">(auto-fills from primary repo if empty)</span></label>
 					<input
 						id="ws-name"
 						bind:value={newName}
-						placeholder={hasRepo ? repoShortName(newRepo) || 'workspace' : 'workspace'}
+						placeholder={hasRepos ? repoShortName(primaryRepo?.url || '') || 'workspace' : 'workspace'}
 						class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
 					/>
 				</div>
-				{#if hasRepo}
+				{#if hasRepos}
 					<p class="text-xs text-foreground-faint">Building from devcontainer may take a few minutes on first run.</p>
 				{/if}
 				<div class="flex gap-2">
@@ -176,6 +222,8 @@
 		{:else}
 			<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
 				{#each workspaces as ws}
+					{@const primary = ws.repos?.find(r => r.primary) || ws.repos?.[0]}
+					{@const extraCount = (ws.repos?.length || 0) - 1}
 					<a
 						href="/workspace/{ws.id}"
 						class="rounded-xl border border-border bg-surface p-5 transition-colors hover:bg-hover-subtle"
@@ -184,9 +232,14 @@
 							<span class="font-medium text-foreground">{ws.name}</span>
 							<StatusDot status={ws.status} />
 						</div>
-						{#if ws.repo}
-							<div class="mb-1 truncate text-xs font-mono text-foreground-secondary">{ws.repo}</div>
-							<div class="text-xs text-foreground-faint">{ws.branch || 'main'}</div>
+						{#if primary}
+							<div class="mb-1 truncate text-xs font-mono text-foreground-secondary">{primary.url}</div>
+							<div class="flex items-center gap-2">
+								<span class="text-xs text-foreground-faint">{primary.branch || 'main'}</span>
+								{#if extraCount > 0}
+									<span class="rounded-full bg-surface-raised px-1.5 py-0.5 text-xs text-foreground-muted">+{extraCount} repo{extraCount > 1 ? 's' : ''}</span>
+								{/if}
+							</div>
 						{:else}
 							<div class="text-xs text-foreground-faint">
 								Created {new Date(ws.created_at).toLocaleDateString()}

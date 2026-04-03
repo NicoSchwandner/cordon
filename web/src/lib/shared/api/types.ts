@@ -65,22 +65,28 @@ export interface ApprovalDecisionRequest {
   duration?: string;
 }
 
+export interface RepoConfig {
+  url: string;
+  branch?: string;
+  base_branch?: string;
+  devcontainer_path?: string;
+  primary?: boolean;
+  service_container?: boolean;
+}
+
 export interface WorkspaceResponse {
   id: string;
   tenant_id: string;
   name: string;
   status: string;
-  repo?: string;
-  branch?: string;
+  repos: RepoConfig[];
   created_at: string;
   expires_at: string;
 }
 
 export interface CreateWorkspaceRequest {
   name: string;
-  repo?: string;
-  base_branch?: string;
-  branch?: string;
+  repos?: RepoConfig[];
   devcontainer_path?: string;
   cpu?: number;
   memory_mb?: number;

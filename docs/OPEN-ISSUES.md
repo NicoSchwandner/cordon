@@ -82,14 +82,15 @@ First workspace from a repo is slow. Subsequent ones could be near-instant with 
 
 ## Workspace Groups (Multi-Repo)
 
-**Status:** Deferred
-**Impact:** Developers working across microservices need multiple workspaces
+**Status:** Done
 
-In a microservice architecture, a single feature may require changes in 2+ repos (e.g., backend API + frontend). Each repo has its own devcontainer.
+**Implementation:** Multi-repo workspaces implemented in three phases:
 
-**Planned approach:** A "workspace group" is a lightweight grouping that creates multiple workspaces on a shared Docker network from a single action. Each workspace is independently manageable (suspend, destroy), but the group provides a unified view. The frontend shows grouped workspaces together. Each workspace gets one repo — no multi-repo containers.
+1. **Multi-repo in single container** — Multiple repos cloned as siblings under `/workspace/<name>/` in the primary devcontainer. Single Claude Code session edits all repos. API accepts `repos` array with `URL@branch` syntax.
 
-This follows the GitHub Codespaces model: one Codespace per repo.
+2. **Service containers** — Repos marked with `service_container: true` get their own devcontainer-built containers on the shared workspace network. Files shared via named Docker volumes. `POST /api/workspaces/{id}/exec` routes commands to the right container based on `repo` parameter. Enhanced destroy cleans up all containers + volumes.
+
+3. **Path-based auto-routing** — A sidecar agent (`cordon-agent`) binary installed in containers. Shell wrappers for common tools (dotnet, npm, go, etc.) intercept commands and route to the correct service container based on `$PWD`. `cd /workspace/frontend && npm test` transparently executes in the frontend's service container.
 
 ## Image Caching
 

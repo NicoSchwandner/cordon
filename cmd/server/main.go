@@ -161,9 +161,11 @@ func main() {
 	mux.Handle("GET /api/workspaces/{id}/logs", authMW(http.HandlerFunc(workspaceHandler.CreationLogs)))
 	mux.Handle("GET /api/workspaces/", authMW(http.HandlerFunc(workspaceHandler.Get)))
 	mux.Handle("DELETE /api/workspaces/", authMW(http.HandlerFunc(workspaceHandler.Delete)))
+	mux.Handle("POST /api/workspaces/{id}/exec", authMW(http.HandlerFunc(workspaceHandler.ExecInWorkspace)))
 	mux.Handle("POST /api/workspaces/{id}/{action}", authMW(http.HandlerFunc(workspaceHandler.Action)))
 
 	// WebSocket endpoints
+	agentRegistry := apiws.NewAgentRegistry()
 	if workspaceProvider != nil {
 		terminalHandler, err := apiws.NewTerminalHandler(workspaceProvider)
 		if err != nil {
@@ -172,6 +174,7 @@ func main() {
 			mux.Handle("/ws/terminal/", authMW(terminalHandler))
 		}
 	}
+	mux.Handle("/ws/agent/", authMW(apiws.NewAgentWSHandler(agentRegistry)))
 	mux.Handle("/ws/approvals", authMW(apiws.NewApprovalWSHandler()))
 	mux.Handle("/ws/audit", authMW(apiws.NewAuditWSHandler()))
 

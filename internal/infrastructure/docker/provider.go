@@ -1,6 +1,7 @@
 package docker
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -16,7 +17,9 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	dockerimage "github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/api/types/network"
+	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/google/uuid"
 	"github.com/nicobistolfi/cordon/internal/application/progress"
@@ -81,8 +84,8 @@ func (p *Provider) SetProgressStore(s *progress.Store) {
 }
 
 func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
-	if config.Repo != "" && p.builder != nil {
-		return p.createFromRepo(ctx, tenantID, config)
+	if config.HasRepos() && p.builder != nil {
+		return p.createFromRepos(ctx, tenantID, config)
 	}
 	return p.createBare(ctx, tenantID, config)
 }
@@ -120,8 +123,9 @@ func (p *Provider) createBare(ctx context.Context, tenantID uuid.UUID, config do
 	return ws, nil
 }
 
-// createFromRepo builds a devcontainer image, creates a container, clones the repo inside, and runs setup.
-func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
+// createFromRepos builds a devcontainer image from the primary repo, creates a container,
+// clones all repos as siblings inside, and runs setup.
+func (p *Provider) createFromRepos(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
 	wsID := config.ID
 	if wsID == uuid.Nil {
 		wsID = uuid.New()
@@ -129,6 +133,11 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 	containerName := p.containerName(config.Name, wsID)
 	now := time.Now().UTC()
 	start := time.Now()
+
+	primary := config.PrimaryRepo()
+	if primary == nil {
+		return domain.Workspace{}, fmt.Errorf("no repos configured")
+	}
 
 	emit := func(step, msg string) {
 		if p.progress != nil {
@@ -138,25 +147,29 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 
 	// Send first event with time estimate
 	if p.progress != nil {
-		p.progress.SendWithEstimate(wsID, config.Repo, "resolving_branch", "Resolving branch...")
+		p.progress.SendWithEstimate(wsID, primary.URL, "resolving_branch", "Resolving branch...")
 	}
 
-	// BaseBranch = build the devcontainer image from (where devcontainer.json lives)
-	// Branch = checkout this branch in the workspace
-	branch := config.Branch
-	if branch == "" {
-		branch = p.ResolveDefaultBranch(config.Repo)
-	}
-	baseBranch := config.BaseBranch
-	if baseBranch == "" {
-		baseBranch = branch
+	// Resolve branches for all repos
+	for i := range config.Repos {
+		repo := &config.Repos[i]
+		if repo.Branch == "" {
+			repo.Branch = p.ResolveDefaultBranch(repo.URL)
+		}
+		if repo.BaseBranch == "" {
+			repo.BaseBranch = repo.Branch
+		}
 	}
 
-	log.Printf("[workspace] creating devcontainer %s from %s (base=%s, branch=%s)", containerName, config.Repo, baseBranch, branch)
+	log.Printf("[workspace] creating devcontainer %s from %s (%d repos)", containerName, primary.URL, len(config.Repos))
 
-	// Build the devcontainer image from the base branch
+	// Build the devcontainer image from the primary repo's base branch
 	emit("building_image", "Building devcontainer image...")
-	result, err := p.builder.Build(ctx, config.Repo, baseBranch, p.token, config.DevcontainerPath)
+	dcPath := primary.DevcontainerPath
+	if dcPath == "" {
+		dcPath = config.DevcontainerPath
+	}
+	result, err := p.builder.Build(ctx, primary.URL, primary.BaseBranch, p.token, dcPath)
 	if err != nil {
 		return domain.Workspace{}, fmt.Errorf("building devcontainer image: %w", err)
 	}
@@ -171,12 +184,11 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 		return domain.Workspace{}, err
 	}
 
-	// Labels include repo metadata
+	// Labels: store repos as JSON
 	labels := p.baseLabels(tenantID, wsID, config.Name, now, config.MaxLifetime)
-	labels["cordon.repo"] = config.Repo
-	labels["cordon.base-branch"] = baseBranch
-	labels["cordon.branch"] = branch
-	labels["cordon.workspace-folder"] = result.WorkspaceFolder
+	reposJSON, _ := json.Marshal(config.Repos)
+	labels["cordon.repos"] = string(reposJSON)
+	labels["cordon.workspace-folder"] = "/workspace"
 
 	// Environment: merge devcontainer env + cordon env + git auth
 	env := []string{
@@ -185,8 +197,8 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 	}
 	if p.token != "" {
 		env = append(env,
-			"GITHUB_TOKEN="+p.token,  // gh CLI reads this
-			"GH_TOKEN="+p.token,      // gh CLI also reads this
+			"GITHUB_TOKEN="+p.token,
+			"GH_TOKEN="+p.token,
 		)
 	}
 	for k, v := range result.Env {
@@ -217,48 +229,214 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 		}
 	}
 
-	// Clone repo inside the running container
-	emit("cloning_repo", fmt.Sprintf("Cloning repository (branch: %s)...", branch))
-	cloneURL := p.cloneURL(config.Repo)
-	log.Printf("[workspace] cloning repo inside container (branch=%s)", branch)
-	cloneCmd := fmt.Sprintf("git clone --branch %s %s %s", branch, cloneURL, result.WorkspaceFolder)
-	if _, err := p.execInContainer(ctx, cid, cloneCmd); err != nil {
-		if branch != baseBranch {
-			// Branch doesn't exist yet — clone from base branch, then create the feature branch
-			log.Printf("[workspace] branch %s not found, cloning %s and creating branch", branch, baseBranch)
-			emit("cloning_repo", fmt.Sprintf("Branch %s not found, cloning %s and creating branch...", branch, baseBranch))
-			fallbackCmd := fmt.Sprintf("git clone --branch %s %s %s", baseBranch, cloneURL, result.WorkspaceFolder)
-			if _, err := p.execInContainer(ctx, cid, fallbackCmd); err != nil {
-				log.Printf("[workspace] warning: clone failed: %v", err)
-			} else {
-				checkoutCmd := fmt.Sprintf("cd %s && git checkout -b %s", result.WorkspaceFolder, branch)
-				if _, err := p.execInContainer(ctx, cid, checkoutCmd); err != nil {
-					log.Printf("[workspace] warning: creating branch %s failed: %v", branch, err)
+	// Create workspace parent directory
+	if _, err := p.execInContainer(ctx, cid, "mkdir -p /workspace"); err != nil {
+		log.Printf("[workspace] warning: creating /workspace failed: %v", err)
+	}
+
+	// Clone each repo as a sibling under /workspace/<short-name>/
+	for _, repo := range config.Repos {
+		shortName := domain.RepoShortName(repo.URL)
+		cloneDir := "/workspace/" + shortName
+		emit("cloning_repo", fmt.Sprintf("Cloning %s (branch: %s)...", shortName, repo.Branch))
+
+		cloneURL := p.cloneURL(repo.URL)
+		log.Printf("[workspace] cloning %s into %s (branch=%s)", repo.URL, cloneDir, repo.Branch)
+
+		cloneCmd := fmt.Sprintf("git clone --branch %s %s %s", repo.Branch, cloneURL, cloneDir)
+		if _, err := p.execInContainer(ctx, cid, cloneCmd); err != nil {
+			if repo.Branch != repo.BaseBranch {
+				log.Printf("[workspace] branch %s not found, cloning %s and creating branch", repo.Branch, repo.BaseBranch)
+				emit("cloning_repo", fmt.Sprintf("Branch %s not found, cloning %s...", repo.Branch, repo.BaseBranch))
+				fallbackCmd := fmt.Sprintf("git clone --branch %s %s %s", repo.BaseBranch, cloneURL, cloneDir)
+				if _, err := p.execInContainer(ctx, cid, fallbackCmd); err != nil {
+					log.Printf("[workspace] warning: clone of %s failed: %v", repo.URL, err)
+				} else {
+					checkoutCmd := fmt.Sprintf("cd %s && git checkout -b %s", cloneDir, repo.Branch)
+					if _, err := p.execInContainer(ctx, cid, checkoutCmd); err != nil {
+						log.Printf("[workspace] warning: creating branch %s failed: %v", repo.Branch, err)
+					}
 				}
+			} else {
+				log.Printf("[workspace] warning: clone of %s failed: %v", repo.URL, err)
 			}
-		} else {
-			log.Printf("[workspace] warning: clone failed: %v", err)
 		}
 	}
 
-	// Run postCreateCommand
+	// Phase 2: Start service containers for repos that need their own runtime
+	serviceContainers := map[string]string{} // repoShortName -> container ID
+	for _, repo := range config.Repos {
+		if !repo.ServiceContainer || (repo.Primary && !repo.ServiceContainer) {
+			continue
+		}
+		shortName := domain.RepoShortName(repo.URL)
+		emit("building_service", fmt.Sprintf("Building service container for %s...", shortName))
+
+		// Build devcontainer image for service repo
+		dcPath := repo.DevcontainerPath
+		svcResult, err := p.builder.Build(ctx, repo.URL, repo.BaseBranch, p.token, dcPath)
+		if err != nil {
+			log.Printf("[workspace] warning: service container build for %s failed: %v", shortName, err)
+			continue
+		}
+		if svcResult.Cached {
+			emit("building_service", fmt.Sprintf("Using cached image for %s", shortName))
+		}
+
+		// Create named volume for this repo's files
+		volName := fmt.Sprintf("cordon-vol-%s-%s", wsID.String()[:8], shortName)
+		_, err = p.client.VolumeCreate(ctx, volume.CreateOptions{
+			Name: volName,
+			Labels: map[string]string{
+				"cordon.workspace": wsID.String(),
+				"cordon.repo":     shortName,
+			},
+		})
+		if err != nil {
+			log.Printf("[workspace] warning: volume create for %s failed: %v", shortName, err)
+			continue
+		}
+
+		// Copy repo files from primary container to the volume
+		// We do this by creating a temp container that mounts the volume,
+		// then copy from primary. Simpler: exec cp in primary after mounting.
+		// Actually, we'll mount the volume in the service container and clone there.
+
+		svcContainerName := fmt.Sprintf("%s-%s-svc", containerName, shortName)
+		svcLabels := map[string]string{
+			"cordon.tenant":      tenantID.String(),
+			"cordon.workspace":   wsID.String(),
+			"cordon.service-for": shortName,
+			"cordon.name":        config.Name + "-" + shortName,
+			"cordon.created":     now.Format(time.RFC3339),
+		}
+
+		svcMount := mount.Mount{
+			Type:   mount.TypeVolume,
+			Source: volName,
+			Target: "/workspace/" + shortName,
+		}
+
+		svcEnv := []string{
+			"ZT_WORKSPACE_ID=" + wsID.String(),
+			"ZT_TENANT_ID=" + tenantID.String(),
+			"CORDON_SERVICE_REPO=" + shortName,
+		}
+		if p.token != "" {
+			svcEnv = append(svcEnv, "GITHUB_TOKEN="+p.token, "GH_TOKEN="+p.token)
+		}
+		for k, v := range svcResult.Env {
+			svcEnv = append(svcEnv, k+"="+v)
+		}
+
+		networkName := containerName + "-net"
+		err = p.startContainerRaw(ctx, startContainerOpts{
+			name:        svcContainerName,
+			image:       svcResult.ImageName,
+			labels:      svcLabels,
+			env:         svcEnv,
+			mounts:      []mount.Mount{svcMount},
+			networkName: networkName,
+			cpu:         config.CPU,
+			memoryMB:    config.MemoryMB,
+		})
+		if err != nil {
+			log.Printf("[workspace] warning: service container start for %s failed: %v", shortName, err)
+			continue
+		}
+
+		// Clone repo into the service container's volume
+		svcCID := svcContainerName // use name for exec lookup
+		cloneURL := p.cloneURL(repo.URL)
+		cloneDir := "/workspace/" + shortName
+		cloneCmd := fmt.Sprintf("git clone --branch %s %s %s", repo.Branch, cloneURL, cloneDir)
+		if _, err := p.execInContainerByName(ctx, svcContainerName, cloneCmd); err != nil {
+			log.Printf("[workspace] warning: clone into service container %s failed: %v", shortName, err)
+		}
+
+		// Run service container's postCreateCommand
+		for _, cmd := range svcResult.PostCreateCommand {
+			shellCmd := fmt.Sprintf("cd %s && %s", cloneDir, cmd)
+			if _, err := p.execInContainerByName(ctx, svcContainerName, shellCmd); err != nil {
+				log.Printf("[workspace] warning: service postCreateCommand for %s failed: %v", shortName, err)
+			}
+		}
+
+		serviceContainers[shortName] = svcContainerName
+		log.Printf("[workspace] service container %s is running for repo %s", svcContainerName, shortName)
+		_ = svcCID
+	}
+
+	// Phase 3: Install routing layer if service containers exist
+	if len(serviceContainers) > 0 {
+		svcJSON, _ := json.Marshal(serviceContainers)
+
+		// Write service container mapping
+		markerCmd := fmt.Sprintf(`mkdir -p /workspace/.cordon && echo '%s' > /workspace/.cordon/service-containers.json`, string(svcJSON))
+		p.execInContainer(ctx, cid, markerCmd)
+
+		// Write repo map for cordon-agent exec routing
+		repoMap := map[string]map[string]string{}
+		for shortName, svcName := range serviceContainers {
+			repoMap[shortName] = map[string]string{
+				"container": svcName,
+				"path":      "/workspace/" + shortName,
+			}
+		}
+		repoMapJSON, _ := json.Marshal(repoMap)
+		repoMapCmd := fmt.Sprintf(`echo '%s' > /workspace/.cordon/repos.json`, string(repoMapJSON))
+		p.execInContainer(ctx, cid, repoMapCmd)
+
+		// Create shell wrapper directory and wrappers for common tools
+		emit("configuring_routing", "Setting up command routing...")
+		tools := []string{"dotnet", "npm", "npx", "node", "go", "cargo", "python", "python3", "pip", "make", "gradle", "mvn", "yarn", "pnpm", "bun"}
+		wrapperScript := `#!/bin/sh
+exec cordon-agent exec "$(basename "$0")" "$@"`
+
+		mkdirCmd := "mkdir -p /workspace/.cordon/bin"
+		p.execInContainer(ctx, cid, mkdirCmd)
+
+		for _, tool := range tools {
+			writeCmd := fmt.Sprintf(`cat > /workspace/.cordon/bin/%s << 'WRAPPER'
+%s
+WRAPPER
+chmod +x /workspace/.cordon/bin/%s`, tool, wrapperScript, tool)
+			p.execInContainer(ctx, cid, writeCmd)
+		}
+
+		// Add wrapper bin to PATH via shell profile
+		profileCmd := `echo 'export PATH="/workspace/.cordon/bin:$PATH"' >> /etc/profile.d/cordon-routing.sh`
+		p.execInContainer(ctx, cid, profileCmd)
+
+		// Set routing env vars in primary container
+		envCmd := fmt.Sprintf(`cat >> /etc/profile.d/cordon-routing.sh << 'EOF'
+export CORDON_WORKSPACE_ID="%s"
+export CORDON_TENANT_ID="%s"
+EOF`, wsID.String(), tenantID.String())
+		p.execInContainer(ctx, cid, envCmd)
+
+		log.Printf("[workspace] routing layer installed (%d tool wrappers)", len(tools))
+	}
+
+	// Run postCreateCommand from the primary repo's devcontainer
 	if len(result.PostCreateCommand) > 0 {
 		emit("post_create", "Running post-create commands...")
 	}
+	primaryDir := "/workspace/" + domain.RepoShortName(primary.URL)
 	for _, cmd := range result.PostCreateCommand {
 		log.Printf("[workspace] running postCreateCommand: %s", cmd)
-		shellCmd := fmt.Sprintf("cd %s && %s", result.WorkspaceFolder, cmd)
-		if _, err := p.execInContainer(ctx, ws.ID.String()[:12], shellCmd); err != nil {
+		shellCmd := fmt.Sprintf("cd %s && %s", primaryDir, cmd)
+		if _, err := p.execInContainer(ctx, cid, shellCmd); err != nil {
 			log.Printf("[workspace] warning: postCreateCommand failed: %v", err)
 		}
 	}
 
 	// Record build timing for future estimates
 	if p.progress != nil && p.progress.Timing() != nil {
-		p.progress.Timing().Record(config.Repo, time.Since(start))
+		p.progress.Timing().Record(primary.URL, time.Since(start))
 	}
 
-	log.Printf("[workspace] %s is ready", containerName)
+	log.Printf("[workspace] %s is ready (%d repos, %d service containers)", containerName, len(config.Repos), len(serviceContainers))
 	return ws, nil
 }
 
@@ -304,36 +482,30 @@ func (p *Provider) pullImage(ctx context.Context, image string) {
 	}
 }
 
+type startContainerOpts struct {
+	name        string
+	image       string
+	labels      map[string]string
+	env         []string
+	mounts      []mount.Mount
+	networkName string // Docker network name to join
+	cpu         int
+	memoryMB    int
+}
+
 func (p *Provider) startContainer(ctx context.Context, containerName, image string, labels map[string]string, env []string, config domain.WorkspaceConfig, networkID string, tenantID, wsID uuid.UUID, now time.Time) (domain.Workspace, error) {
-	cpuQuota := int64(config.CPU) * 100000
-	memLimit := int64(config.MemoryMB) * 1024 * 1024
-
-	containerConfig := &container.Config{
-		Image:  image,
-		Labels: labels,
-		Env:    env,
-		Cmd:    []string{"sleep", "infinity"},
+	networkName := containerName + "-net"
+	if err := p.startContainerRaw(ctx, startContainerOpts{
+		name:        containerName,
+		image:       image,
+		labels:      labels,
+		env:         env,
+		networkName: networkName,
+		cpu:         config.CPU,
+		memoryMB:    config.MemoryMB,
+	}); err != nil {
+		return domain.Workspace{}, err
 	}
-
-	hostConfig := &container.HostConfig{
-		Resources: container.Resources{
-			CPUQuota: cpuQuota,
-			Memory:   memLimit,
-		},
-		NetworkMode: container.NetworkMode(containerName + "-net"),
-	}
-
-	resp, err := p.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
-	if err != nil {
-		return domain.Workspace{}, fmt.Errorf("creating container: %w", err)
-	}
-
-	log.Printf("[workspace] starting container %s", resp.ID[:12])
-	if err := p.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
-		p.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		return domain.Workspace{}, fmt.Errorf("starting container: %w", err)
-	}
-	log.Printf("[workspace] %s is running (container=%s)", containerName, resp.ID[:12])
 
 	return domain.Workspace{
 		ID:        wsID,
@@ -344,6 +516,40 @@ func (p *Provider) startContainer(ctx context.Context, containerName, image stri
 		ExpiresAt: now.Add(config.MaxLifetime),
 		Config:    config,
 	}, nil
+}
+
+func (p *Provider) startContainerRaw(ctx context.Context, opts startContainerOpts) error {
+	cpuQuota := int64(opts.cpu) * 100000
+	memLimit := int64(opts.memoryMB) * 1024 * 1024
+
+	containerConfig := &container.Config{
+		Image:  opts.image,
+		Labels: opts.labels,
+		Env:    opts.env,
+		Cmd:    []string{"sleep", "infinity"},
+	}
+
+	hostConfig := &container.HostConfig{
+		Resources: container.Resources{
+			CPUQuota: cpuQuota,
+			Memory:   memLimit,
+		},
+		NetworkMode: container.NetworkMode(opts.networkName),
+		Mounts:      opts.mounts,
+	}
+
+	resp, err := p.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, opts.name)
+	if err != nil {
+		return fmt.Errorf("creating container: %w", err)
+	}
+
+	log.Printf("[workspace] starting container %s", resp.ID[:12])
+	if err := p.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
+		p.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
+		return fmt.Errorf("starting container: %w", err)
+	}
+	log.Printf("[workspace] %s is running (container=%s)", opts.name, resp.ID[:12])
+	return nil
 }
 
 func (p *Provider) execInContainer(ctx context.Context, containerIDPrefix, cmd string) (int, error) {
@@ -366,6 +572,43 @@ func (p *Provider) execInContainer(ctx context.Context, containerIDPrefix, cmd s
 	}
 
 	execResp, err := p.client.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		Cmd:          []string{"sh", "-c", cmd},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return -1, fmt.Errorf("creating exec: %w", err)
+	}
+
+	if err := p.client.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
+		return -1, fmt.Errorf("starting exec: %w", err)
+	}
+
+	for {
+		inspect, err := p.client.ContainerExecInspect(ctx, execResp.ID)
+		if err != nil {
+			return -1, err
+		}
+		if !inspect.Running {
+			if inspect.ExitCode != 0 {
+				return inspect.ExitCode, fmt.Errorf("command exited with code %d", inspect.ExitCode)
+			}
+			return 0, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// execInContainerByName runs a shell command in a container identified by name.
+func (p *Provider) execInContainerByName(ctx context.Context, containerName, cmd string) (int, error) {
+	containers, err := p.client.ContainerList(ctx, container.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("name", containerName)),
+	})
+	if err != nil || len(containers) == 0 {
+		return -1, fmt.Errorf("container %s not found", containerName)
+	}
+
+	execResp, err := p.client.ContainerExecCreate(ctx, containers[0].ID, container.ExecOptions{
 		Cmd:          []string{"sh", "-c", cmd},
 		AttachStdout: true,
 		AttachStderr: true,
@@ -438,6 +681,10 @@ func (p *Provider) List(ctx context.Context, tenantID uuid.UUID) ([]domain.Works
 
 	result := make([]domain.Workspace, 0, len(containers))
 	for _, c := range containers {
+		// Skip service containers — only list primary workspaces
+		if c.Labels["cordon.service-for"] != "" {
+			continue
+		}
 		result = append(result, containerToWorkspace(c))
 	}
 	return result, nil
@@ -460,30 +707,130 @@ func (p *Provider) Resume(ctx context.Context, tenantID, workspaceID uuid.UUID) 
 }
 
 func (p *Provider) Destroy(ctx context.Context, tenantID, workspaceID uuid.UUID) error {
-	c, err := p.findContainer(ctx, tenantID, workspaceID)
+	// Find ALL containers for this workspace (primary + service containers)
+	containers, err := p.client.ContainerList(ctx, container.ListOptions{
+		All: true,
+		Filters: filters.NewArgs(
+			filters.Arg("label", "cordon.workspace="+workspaceID.String()),
+		),
+	})
 	if err != nil {
-		return err
+		return fmt.Errorf("querying docker: %w", err)
+	}
+	if len(containers) == 0 {
+		return fmt.Errorf("workspace not found")
 	}
 
-	name := c.Labels["cordon.name"]
-	log.Printf("[workspace] destroying %s (container=%s)", name, c.ID[:12])
+	log.Printf("[workspace] destroying workspace %s (%d containers)", workspaceID.String()[:8], len(containers))
 
-	if err := p.client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
-		log.Printf("[workspace] warning: container remove failed: %v", err)
+	// Remove all containers
+	var networkName string
+	for _, c := range containers {
+		svcFor := c.Labels["cordon.service-for"]
+		if svcFor != "" {
+			log.Printf("[workspace] removing service container for %s (%s)", svcFor, c.ID[:12])
+		} else {
+			log.Printf("[workspace] removing primary container (%s)", c.ID[:12])
+			if len(c.Names) > 0 {
+				networkName = strings.TrimPrefix(c.Names[0], "/") + "-net"
+			}
+		}
+		if err := p.client.ContainerRemove(ctx, c.ID, container.RemoveOptions{Force: true}); err != nil {
+			log.Printf("[workspace] warning: container remove failed: %v", err)
+		}
 	}
 
-	networkName := ""
-	if len(c.Names) > 0 {
-		networkName = strings.TrimPrefix(c.Names[0], "/") + "-net"
+	// Remove workspace volumes
+	volumes, _ := p.client.VolumeList(ctx, volume.ListOptions{
+		Filters: filters.NewArgs(
+			filters.Arg("label", "cordon.workspace="+workspaceID.String()),
+		),
+	})
+	for _, v := range volumes.Volumes {
+		log.Printf("[workspace] removing volume %s", v.Name)
+		if err := p.client.VolumeRemove(ctx, v.Name, true); err != nil {
+			log.Printf("[workspace] warning: volume remove failed: %v", err)
+		}
 	}
+
+	// Remove network
 	if networkName != "" {
 		if err := p.client.NetworkRemove(ctx, networkName); err != nil {
 			log.Printf("[workspace] warning: network remove failed: %v", err)
 		}
 	}
 
-	log.Printf("[workspace] destroyed %s", name)
+	log.Printf("[workspace] workspace destroyed")
 	return nil
+}
+
+// ExecInRepo executes a command in the container that owns a specific repo.
+// If repoName is empty or matches the primary repo, exec in the primary container.
+func (p *Provider) ExecInRepo(ctx context.Context, workspaceID uuid.UUID, repoName string, cmd []string) (int, string, error) {
+	containers, err := p.client.ContainerList(ctx, container.ListOptions{
+		Filters: filters.NewArgs(
+			filters.Arg("label", "cordon.workspace="+workspaceID.String()),
+		),
+	})
+	if err != nil {
+		return -1, "", fmt.Errorf("querying docker: %w", err)
+	}
+
+	// Find the right container
+	var targetID string
+	for _, c := range containers {
+		svcFor := c.Labels["cordon.service-for"]
+		if repoName != "" && svcFor == repoName {
+			targetID = c.ID
+			break
+		}
+		if svcFor == "" {
+			// Primary container — use as default
+			if repoName == "" {
+				targetID = c.ID
+				break
+			}
+			// Check if this repo is a non-service repo (cloned in primary)
+			if targetID == "" {
+				targetID = c.ID // fallback to primary
+			}
+		}
+	}
+
+	if targetID == "" {
+		return -1, "", fmt.Errorf("no container found for repo %q", repoName)
+	}
+
+	// Execute with output capture
+	execResp, err := p.client.ContainerExecCreate(ctx, targetID, container.ExecOptions{
+		Cmd:          cmd,
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return -1, "", fmt.Errorf("creating exec: %w", err)
+	}
+
+	attach, err := p.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return -1, "", fmt.Errorf("attaching exec: %w", err)
+	}
+	defer attach.Close()
+
+	var buf bytes.Buffer
+	io.Copy(&buf, attach.Reader)
+
+	// Wait for completion
+	for {
+		inspect, err := p.client.ContainerExecInspect(ctx, execResp.ID)
+		if err != nil {
+			return -1, buf.String(), err
+		}
+		if !inspect.Running {
+			return inspect.ExitCode, buf.String(), nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
 }
 
 func (p *Provider) Exec(ctx context.Context, tenantID, workspaceID uuid.UUID, cmd []string) (int, error) {
@@ -592,6 +939,11 @@ func containerToWorkspace(c types.Container) domain.Workspace {
 		status = domain.WorkspaceCreating
 	}
 
+	var repos []domain.RepoConfig
+	if reposJSON := c.Labels["cordon.repos"]; reposJSON != "" {
+		json.Unmarshal([]byte(reposJSON), &repos)
+	}
+
 	return domain.Workspace{
 		ID:        wsID,
 		TenantID:  tenantID,
@@ -600,9 +952,7 @@ func containerToWorkspace(c types.Container) domain.Workspace {
 		CreatedAt: created,
 		ExpiresAt: expires,
 		Config: domain.WorkspaceConfig{
-			Repo:       c.Labels["cordon.repo"],
-			BaseBranch: c.Labels["cordon.base-branch"],
-			Branch:     c.Labels["cordon.branch"],
+			Repos: repos,
 		},
 	}
 }

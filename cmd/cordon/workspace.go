@@ -21,7 +21,7 @@ func workspaceCmd() *cobra.Command {
 		Aliases: []string{"ws"},
 		Short:   "Manage workspaces",
 	}
-	cmd.AddCommand(wsCreateCmd(), wsListCmd(), wsDestroyCmd())
+	cmd.AddCommand(wsCreateCmd(), wsListCmd(), wsDestroyCmd(), wsExecCmd())
 	return cmd
 }
 
@@ -34,14 +34,45 @@ type progressEvent struct {
 	EstimatedSecs int    `json:"estimated_secs,omitempty"`
 }
 
+// parseRepoFlag parses "url@branch" into (url, branch).
+// If no "@" is present, branch is empty.
+func parseRepoFlag(value string) (string, string) {
+	// Find the last "@" to handle URLs that might contain "@"
+	idx := strings.LastIndex(value, "@")
+	if idx == -1 || idx == 0 {
+		return value, ""
+	}
+	// Make sure we're not splitting a URL like git@github.com
+	url := value[:idx]
+	branch := value[idx+1:]
+	// If url doesn't look like a repo URL (no dots/slashes), treat as plain URL
+	if !strings.Contains(url, "/") && !strings.Contains(url, ".") {
+		return value, ""
+	}
+	return url, branch
+}
+
+type repoConfigJSON struct {
+	URL              string `json:"url"`
+	Branch           string `json:"branch,omitempty"`
+	Primary          bool   `json:"primary,omitempty"`
+	ServiceContainer bool   `json:"service_container,omitempty"`
+}
+
 func wsCreateCmd() *cobra.Command {
-	var repo, branch, baseBranch string
+	var repoFlags []string
 	var cpu, memMB int
 
 	cmd := &cobra.Command{
 		Use:   "create [name]",
 		Short: "Create a new workspace",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Create a new workspace, optionally from one or more repositories.
+
+Use URL@branch syntax to specify branches per repo:
+  cordon ws create my-feature --repo github.com/org/backend@DEV-123 --repo github.com/org/frontend@DEV-123
+
+The first --repo is the primary (devcontainer source). Omit @branch to auto-detect.`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			name := "workspace"
 			if len(args) > 0 {
@@ -53,14 +84,25 @@ func wsCreateCmd() *cobra.Command {
 				"cpu":       cpu,
 				"memory_mb": memMB,
 			}
-			if repo != "" {
-				reqBody["repo"] = repo
-			}
-			if branch != "" {
-				reqBody["branch"] = branch
-			}
-			if baseBranch != "" {
-				reqBody["base_branch"] = baseBranch
+
+			if len(repoFlags) > 0 {
+				repos := make([]repoConfigJSON, len(repoFlags))
+				for i, flag := range repoFlags {
+					// Check for :service suffix
+					svc := false
+					if strings.HasSuffix(flag, ":service") {
+						svc = true
+						flag = strings.TrimSuffix(flag, ":service")
+					}
+					url, branch := parseRepoFlag(flag)
+					repos[i] = repoConfigJSON{
+						URL:              url,
+						Branch:           branch,
+						Primary:          i == 0,
+						ServiceContainer: svc,
+					}
+				}
+				reqBody["repos"] = repos
 			}
 
 			body, _ := json.Marshal(reqBody)
@@ -98,9 +140,7 @@ func wsCreateCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&repo, "repo", "", "Git repository to clone")
-	cmd.Flags().StringVar(&branch, "branch", "", "Branch to checkout in the workspace")
-	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "Base branch for devcontainer image (defaults to --branch)")
+	cmd.Flags().StringArrayVar(&repoFlags, "repo", nil, "Repository URL (use url@branch for branch, repeatable)")
 	cmd.Flags().IntVar(&cpu, "cpu", 2, "CPU cores")
 	cmd.Flags().IntVar(&memMB, "memory", 4096, "Memory in MB")
 	return cmd
@@ -188,14 +228,38 @@ func wsListCmd() *cobra.Command {
 				ID        string `json:"id"`
 				Name      string `json:"name"`
 				Status    string `json:"status"`
+				Repos     []struct {
+					URL     string `json:"url"`
+					Branch  string `json:"branch"`
+					Primary bool   `json:"primary"`
+				} `json:"repos"`
 				CreatedAt string `json:"created_at"`
 			}
 			json.Unmarshal(data, &workspaces)
 
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintln(w, "ID\tNAME\tSTATUS\tCREATED")
+			fmt.Fprintln(w, "ID\tNAME\tSTATUS\tREPOS\tCREATED")
 			for _, ws := range workspaces {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", ws.ID[:8], ws.Name, ws.Status, ws.CreatedAt[:19])
+				repoSummary := "-"
+				if len(ws.Repos) > 0 {
+					primary := ws.Repos[0]
+					for _, r := range ws.Repos {
+						if r.Primary {
+							primary = r
+							break
+						}
+					}
+					parts := strings.Split(primary.URL, "/")
+					repoSummary = parts[len(parts)-1]
+					if len(ws.Repos) > 1 {
+						repoSummary += fmt.Sprintf(" +%d", len(ws.Repos)-1)
+					}
+				}
+				created := ws.CreatedAt
+				if len(created) > 19 {
+					created = created[:19]
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", ws.ID[:8], ws.Name, ws.Status, repoSummary, created)
 			}
 			w.Flush()
 			return nil
@@ -229,6 +293,69 @@ func wsDestroyCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+func wsExecCmd() *cobra.Command {
+	var repo string
+
+	cmd := &cobra.Command{
+		Use:   "exec <workspace-id> -- <command...>",
+		Short: "Execute a command in a workspace container",
+		Long: `Execute a command in a workspace container. Use --repo to target
+a specific repo's service container (Phase 2).
+
+Examples:
+  cordon ws exec abc12345 -- ls /workspace
+  cordon ws exec abc12345 --repo frontend -- npm run build`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fullID, err := resolveWorkspaceID(args[0])
+			if err != nil {
+				return err
+			}
+
+			// Everything after "--" is the command
+			cmdArgs := cmd.Flags().Args()
+			if len(cmdArgs) < 2 {
+				return fmt.Errorf("no command specified (use -- before the command)")
+			}
+			execCmd := cmdArgs[1:]
+
+			reqBody := map[string]any{
+				"cmd": execCmd,
+			}
+			if repo != "" {
+				reqBody["repo"] = repo
+			}
+
+			body, _ := json.Marshal(reqBody)
+			resp, err := http.Post(serverURL+"/api/workspaces/"+fullID+"/exec", "application/json", bytes.NewReader(body))
+			if err != nil {
+				return fmt.Errorf("request failed: %w", err)
+			}
+			defer resp.Body.Close()
+
+			data, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode >= 400 {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", string(data))
+				os.Exit(1)
+			}
+
+			var result struct {
+				ExitCode int    `json:"exit_code"`
+				Output   string `json:"output"`
+			}
+			json.Unmarshal(data, &result)
+			fmt.Print(result.Output)
+			if result.ExitCode != 0 {
+				os.Exit(result.ExitCode)
+			}
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&repo, "repo", "", "Target repo's service container")
+	return cmd
 }
 
 // resolveWorkspaceID resolves a short workspace ID prefix to a full UUID

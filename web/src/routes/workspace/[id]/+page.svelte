@@ -11,6 +11,8 @@
 	let terminalEl: HTMLDivElement | undefined = $state();
 	let creationDone = $state(false);
 	const isCreating = $derived(!creationDone && (!data.workspace || data.workspace.status === 'creating'));
+	const repos = $derived(data.workspace?.repos || []);
+	const primaryRepo = $derived(repos.find(r => r.primary) || repos[0]);
 
 	async function handleCreationReady() {
 		// Refresh workspace data then switch to terminal view
@@ -67,10 +69,17 @@
 			{#if data.workspace}
 				<h1 class="text-xl font-semibold tracking-tight text-foreground">{data.workspace.name}</h1>
 				<StatusDot status={data.workspace.status} />
-				{#if data.workspace.repo}
-					<span class="rounded-full bg-surface-raised px-2.5 py-1 text-xs font-mono text-foreground-secondary">
-						{data.workspace.branch || 'main'}
-					</span>
+				{#if repos.length > 0}
+					<div class="flex items-center gap-1.5">
+						{#each repos as repo}
+							<span class="rounded-full bg-surface-raised px-2.5 py-1 text-xs font-mono text-foreground-secondary" title={repo.url}>
+								{repo.url.split('/').pop()}{#if repo.branch}@{repo.branch}{/if}
+								{#if repo.primary && repos.length > 1}
+									<span class="ml-1 text-foreground-faint">(primary)</span>
+								{/if}
+							</span>
+						{/each}
+					</div>
 				{/if}
 			{:else}
 				<h1 class="text-xl font-semibold tracking-tight text-foreground">Workspace {data.workspaceId}</h1>
