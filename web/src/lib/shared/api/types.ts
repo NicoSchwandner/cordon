@@ -79,6 +79,17 @@ export interface CreateWorkspaceRequest {
   memory_mb?: number;
 }
 
+export interface SecretRef {
+  name: string;
+  placeholder: string;
+}
+
+export interface SetSecretRequest {
+  name: string;
+  placeholder?: string;
+  value: string;
+}
+
 export interface ProblemDetails {
   type: string;
   title: string;

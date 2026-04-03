@@ -1,6 +1,6 @@
-# Go
-server
-cordon-server
+# Go binaries
+/server
+/cordon-server
 *.exe
 tmp/
 

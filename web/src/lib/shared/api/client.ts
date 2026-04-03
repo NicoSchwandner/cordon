@@ -6,6 +6,8 @@ import type {
   ProblemDetails,
   ProxyResult,
   SQLProxyRequest,
+  SecretRef,
+  SetSecretRequest,
   WorkspaceResponse,
   CreateWorkspaceRequest,
 } from "./types";
@@ -98,6 +100,22 @@ export function workspaceAction(
 
 export function getHealth(): Promise<{ status: string }> {
   return fetchJSON("GET", "/health");
+}
+
+export function listSecrets(): Promise<SecretRef[]> {
+  return fetchJSON("GET", "/api/secrets");
+}
+
+export function setSecret(req: SetSecretRequest): Promise<SecretRef> {
+  return fetchJSON("POST", "/api/secrets", req);
+}
+
+export function updateSecret(req: SetSecretRequest): Promise<SecretRef> {
+  return fetchJSON("PUT", "/api/secrets", req);
+}
+
+export function deleteSecret(name: string): Promise<void> {
+  return fetchJSON("DELETE", `/api/secrets/${encodeURIComponent(name)}`);
 }
 
 export { ApiError };
