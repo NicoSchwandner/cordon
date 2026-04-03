@@ -1,8 +1,57 @@
 # Cordon
 
-Zero-trust developer environment. AI agents run in sandboxed workspaces where every operation is intercepted, classified, and audit-logged. Secrets never touch the workspace. Destructive operations require human approval.
+AI coding agents are powerful, but running them on your machine means giving them access to your filesystem, credentials, databases, and network. One bad tool call and an agent can `DROP TABLE production`, exfiltrate your `.env`, or `curl` your secrets to an external server.
 
-## Architecture
+**Cordon moves agent execution off your machine entirely.** Agents run in isolated, ephemeral workspaces where every operation passes through a proxy that classifies, audits, and gates it — before it reaches anything real.
+
+## Why Zero-Trust
+
+Traditional sandboxing (containers, VMs) controls _where_ code runs but not _what it does once running_. An agent inside a container with database credentials can still `DROP TABLE` or `SELECT *` your entire dataset.
+
+Cordon applies zero-trust principles at the **operation level**:
+
+- **No implicit access.** Every SQL query, HTTP request, and shell command is intercepted and classified before execution.
+- **No credential exposure.** Agents work with placeholder tokens (`cordon-placeholder-api-key`). Real credentials are injected at the proxy layer and never enter the workspace.
+- **No unrestricted egress.** Agents can only reach hosts on an explicit allowlist. Everything else is blocked.
+- **No silent destruction.** Destructive operations (DELETE, DROP TABLE) require explicit human approval via the dashboard or CLI.
+- **Full audit trail.** Every operation is logged to an append-only store — what was attempted, what tier it was classified as, whether it was allowed or blocked, and how long it took.
+
+## What Runs Where
+
+```mermaid
+graph LR
+    subgraph your_machine ["Your Machine"]
+        Browser["Browser / CLI"]
+    end
+
+    subgraph cordon_server ["Cordon Server (remote / Docker)"]
+        API["API + Proxy Pipeline"]
+        DB[("Audit DB<br/>(append-only)")]
+        API --> DB
+    end
+
+    subgraph workspace ["Ephemeral Workspace (container)"]
+        Agent["AI Agent"]
+    end
+
+    Browser -->|"approve / deny / view audit"| API
+    Agent -->|"every operation"| API
+    API -->|"only if allowed"| Target["Target Services<br/>(DBs, APIs, etc.)"]
+
+    style your_machine fill:#d4edda,stroke:#28a745
+    style cordon_server fill:#cce5ff,stroke:#007bff
+    style workspace fill:#fff3cd,stroke:#ffc107
+```
+
+| Component                 | Runs on               | Has access to                                                             |
+| ------------------------- | --------------------- | ------------------------------------------------------------------------- |
+| **Your browser / CLI**    | Your machine          | Dashboard, approval prompts — no credentials, no agent code               |
+| **Cordon server + proxy** | Remote host or Docker | Real credentials (for swap), audit DB, tier rules                         |
+| **AI agent workspace**    | Ephemeral container   | Only placeholder tokens, allowlisted egress, no filesystem access to host |
+
+Nothing the agent does can reach your machine. Your machine only talks to the Cordon API to view audit logs and approve/deny operations.
+
+## Proxy Pipeline
 
 ```mermaid
 graph TD
