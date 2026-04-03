@@ -83,7 +83,7 @@
 
 	<!-- Main content: Terminal + Agent Panel -->
 	<div class="grid flex-1 gap-4 lg:grid-cols-[1fr_320px]">
-		<div class="overflow-hidden rounded-xl border border-border bg-surface-inset">
+		<div class="overflow-hidden rounded-xl border border-border" style="background:#0f172a">
 			<div bind:this={terminalEl} class="h-full min-h-[400px] w-full"></div>
 		</div>
 

@@ -78,21 +78,20 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
-	// Build tmux command: create-or-attach a persistent session.
-	// If tmux isn't available, fall back to a plain shell.
-	shell := "if command -v bash >/dev/null 2>&1; then exec bash -li; else exec sh -i; fi"
+	// Start an interactive shell in the workspace folder.
+	// Persistent sessions via tmux are deferred — refresh clears the terminal.
 	startDir := info.WorkspaceFolder
 	if startDir == "" {
 		startDir = "/"
 	}
-	tmuxCmd := fmt.Sprintf(
-		`if command -v tmux >/dev/null 2>&1; then tmux new-session -As cordon -c %s; else cd %s && %s; fi`,
-		startDir, startDir, shell,
+	shellCmd := fmt.Sprintf(
+		`cd %s && if command -v bash >/dev/null 2>&1; then exec bash -li; else exec sh -i; fi`,
+		startDir,
 	)
 
 	// Create exec with PTY
 	execConfig := container.ExecOptions{
-		Cmd:          []string{"/bin/sh", "-c", tmuxCmd},
+		Cmd:          []string{"/bin/sh", "-c", shellCmd},
 		Env:          []string{"TERM=xterm-256color"},
 		AttachStdin:  true,
 		AttachStdout: true,

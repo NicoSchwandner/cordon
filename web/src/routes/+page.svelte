@@ -25,10 +25,8 @@
 			const req: import('$lib/shared/api/types').CreateWorkspaceRequest = { name };
 			if (newRepo.trim()) {
 				req.repo = newRepo.trim();
-				req.branch = newBranch.trim() || 'development';
-				if (newBaseBranch.trim()) {
-					req.base_branch = newBaseBranch.trim();
-				}
+				req.branch = newBranch.trim();
+				req.base_branch = newBaseBranch.trim() || 'development';
 			}
 			const ws = await createWorkspace(req);
 			window.location.href = `/workspace/${ws.id}`;
@@ -97,7 +95,7 @@
 							<input
 								id="ws-base-branch"
 								bind:value={newBaseBranch}
-								placeholder="same as branch"
+								placeholder="development"
 								class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
 							/>
 						</div>
@@ -106,7 +104,8 @@
 							<input
 								id="ws-branch"
 								bind:value={newBranch}
-								placeholder="development"
+								required
+								placeholder="e.g. DEV-12345-my-feature"
 								class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
 							/>
 						</div>

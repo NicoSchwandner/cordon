@@ -1,4 +1,8 @@
-# Cordon
+<p align="center">
+  <img src="web/static/favicon.svg" alt="Cordon" width="64" height="64" />
+</p>
+
+<h1 align="center">Cordon</h1>
 
 AI coding agents are powerful, but running them on your machine means giving them access to your filesystem, credentials, databases, and network. One bad tool call and an agent can `DROP TABLE production`, exfiltrate your `.env`, or `curl` your secrets to an external server.
 

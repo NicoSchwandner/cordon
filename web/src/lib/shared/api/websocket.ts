@@ -89,10 +89,13 @@ export function connectTerminalWS(workspaceId: string): TerminalWS {
   let dataCb: ((data: string | Uint8Array) => void) | null = null;
   const pending: (string | Uint8Array)[] = [];
   let pendingResize: { cols: number; rows: number } | null = null;
+  let lastResize: { cols: number; rows: number } | null = null;
+  let resent = false;
 
   ws.onopen = () => {
     if (pendingResize) {
       ws.send(JSON.stringify({ type: "resize", ...pendingResize }));
+      lastResize = pendingResize;
       pendingResize = null;
     }
   };
@@ -100,6 +103,17 @@ export function connectTerminalWS(workspaceId: string): TerminalWS {
   ws.onmessage = (ev) => {
     const chunk =
       ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data;
+
+    // Re-send resize after first data arrives (tmux is now attached and ready)
+    if (!resent && lastResize) {
+      resent = true;
+      setTimeout(() => {
+        if (ws.readyState === WebSocket.OPEN && lastResize) {
+          ws.send(JSON.stringify({ type: "resize", ...lastResize }));
+        }
+      }, 100);
+    }
+
     if (dataCb) {
       dataCb(chunk);
     } else {

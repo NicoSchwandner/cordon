@@ -38,10 +38,8 @@
 	>
 		<a href="/" class="mb-4 block px-3 py-2">
 			<span class="flex items-center gap-2">
-				<span
-					class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-primary"
-				>
-					<span class="text-xs font-bold leading-none text-on-primary">C</span>
+				<span class="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border border-sidebar-border">
+					<span class="inline-block h-3.5 w-1 rounded-sm bg-[#f5c518]"></span>
 				</span>
 				<h2 class="text-sm font-semibold tracking-tight text-foreground">Cordon</h2>
 				{#if healthy === true}

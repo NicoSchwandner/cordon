@@ -170,11 +170,6 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 
 	cid := ws.ID.String()[:12]
 
-	// Install tmux for persistent terminal sessions
-	if _, err := p.execInContainer(ctx, cid, "command -v tmux >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq tmux >/dev/null 2>&1)"); err != nil {
-		log.Printf("[workspace] warning: tmux install failed: %v", err)
-	}
-
 	// Configure git: credential helper + user identity
 	if p.token != "" {
 		credHelper := `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'`
