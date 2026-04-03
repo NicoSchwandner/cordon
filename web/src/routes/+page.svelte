@@ -3,7 +3,7 @@
 	import DecisionBadge from '$lib/shared/components/DecisionBadge.svelte';
 	import TimeAgo from '$lib/shared/components/TimeAgo.svelte';
 	import StatusDot from '$lib/shared/components/StatusDot.svelte';
-	import { createWorkspace } from '$lib/shared/api/client';
+	import { createWorkspace, getDefaultBranch } from '$lib/shared/api/client';
 	import type { WorkspaceResponse } from '$lib/shared/api/types';
 
 	let { data } = $props();
@@ -14,9 +14,28 @@
 	let newBaseBranch = $state('');
 	let newBranch = $state('');
 	let creating = $state(false);
+	let detectedBranch = $state('');
+	let branchTimer: ReturnType<typeof setTimeout> | undefined;
 	let extraWorkspaces: WorkspaceResponse[] = $state([]);
 	const workspaces = $derived([...extraWorkspaces, ...data.workspaces]);
 	const hasRepo = $derived(newRepo.trim().length > 0);
+
+	$effect(() => {
+		const repo = newRepo.trim();
+		clearTimeout(branchTimer);
+		if (!repo) {
+			detectedBranch = '';
+			return;
+		}
+		branchTimer = setTimeout(async () => {
+			try {
+				const result = await getDefaultBranch(repo);
+				detectedBranch = result.default_branch;
+			} catch {
+				detectedBranch = '';
+			}
+		}, 500);
+	});
 
 	async function handleCreate() {
 		const name = newName.trim() || repoShortName(newRepo) || 'workspace';
@@ -26,7 +45,7 @@
 			if (newRepo.trim()) {
 				req.repo = newRepo.trim();
 				req.branch = newBranch.trim();
-				req.base_branch = newBaseBranch.trim() || 'development';
+				req.base_branch = newBaseBranch.trim() || detectedBranch || 'main';
 			}
 			const ws = await createWorkspace(req);
 			window.location.href = `/workspace/${ws.id}`;
@@ -95,7 +114,7 @@
 							<input
 								id="ws-base-branch"
 								bind:value={newBaseBranch}
-								placeholder="development"
+								placeholder={detectedBranch || 'main'}
 								class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
 							/>
 						</div>

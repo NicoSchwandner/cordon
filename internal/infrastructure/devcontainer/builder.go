@@ -23,6 +23,7 @@ type BuildResult struct {
 	RemoteUser        string
 	WorkspaceFolder   string
 	Env               map[string]string
+	Cached            bool // true if an existing image was reused
 }
 
 // NewBuilder creates a Builder, verifying that the devcontainer CLI is available.
@@ -71,25 +72,35 @@ func (b *Builder) Build(ctx context.Context, repo, branch, token, devcontainerPa
 		configPath = generated
 	}
 
+	// Read raw config content for cache-busting hash
+	configContent, err := os.ReadFile(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading devcontainer config: %w", err)
+	}
+
 	// Parse the config
-	cfg, err := ParseFile(configPath)
+	cfg, err := Parse(configContent)
 	if err != nil {
 		return nil, fmt.Errorf("parsing devcontainer config: %w", err)
 	}
 
-	// Build the image
-	imageTag := fmt.Sprintf("cordon-ws-%s", imageHash(repo, branch))
-	log.Printf("[devcontainer] building image %s", imageTag)
-
-	buildCmd := exec.CommandContext(ctx, b.cliPath, "build",
-		"--workspace-folder", tmpDir,
-		"--image-name", imageTag,
-	)
-	buildCmd.Env = os.Environ()
-	if out, err := buildCmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("devcontainer build failed: %w\n%s", err, out)
+	// Build the image (or reuse cached)
+	imageTag := fmt.Sprintf("cordon-ws-%s", imageHash(repo, branch, configContent))
+	cached := imageExists(ctx, imageTag)
+	if cached {
+		log.Printf("[devcontainer] using cached image %s", imageTag)
+	} else {
+		log.Printf("[devcontainer] building image %s", imageTag)
+		buildCmd := exec.CommandContext(ctx, b.cliPath, "build",
+			"--workspace-folder", tmpDir,
+			"--image-name", imageTag,
+		)
+		buildCmd.Env = os.Environ()
+		if out, err := buildCmd.CombinedOutput(); err != nil {
+			return nil, fmt.Errorf("devcontainer build failed: %w\n%s", err, out)
+		}
+		log.Printf("[devcontainer] image %s built successfully", imageTag)
 	}
-	log.Printf("[devcontainer] image %s built successfully", imageTag)
 
 	// Merge env maps
 	env := make(map[string]string)
@@ -106,6 +117,7 @@ func (b *Builder) Build(ctx context.Context, repo, branch, token, devcontainerPa
 		RemoteUser:        cfg.RemoteUser,
 		WorkspaceFolder:   cfg.WorkspaceFolder,
 		Env:               env,
+		Cached:            cached,
 	}, nil
 }
 
@@ -129,8 +141,17 @@ func injectToken(repoURL, token string) string {
 	return u.String()
 }
 
+// imageExists checks if a Docker image with the given tag exists locally.
+func imageExists(ctx context.Context, tag string) bool {
+	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", tag)
+	return cmd.Run() == nil
+}
+
 // imageHash creates a short deterministic hash for image tagging.
-func imageHash(repo, branch string) string {
-	h := sha256.Sum256([]byte(repo + ":" + branch))
-	return fmt.Sprintf("%x", h[:6])
+// Includes config content so devcontainer.json changes invalidate the cache.
+func imageHash(repo, branch string, configContent []byte) string {
+	h := sha256.New()
+	h.Write([]byte(repo + ":" + branch + ":"))
+	h.Write(configContent)
+	return fmt.Sprintf("%x", h.Sum(nil)[:6])
 }

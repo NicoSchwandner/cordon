@@ -27,6 +27,7 @@ type Workspace struct {
 }
 
 type WorkspaceConfig struct {
+	ID               uuid.UUID     // pre-generated workspace ID (zero = auto-generate)
 	Name             string
 	DevcontainerPath string
 	CPU              int

@@ -1,16 +1,30 @@
 <script lang="ts">
 	import StatusDot from '$lib/shared/components/StatusDot.svelte';
+	import CreationProgress from '$lib/shared/components/CreationProgress.svelte';
 	import AgentPanel from '$lib/security/AgentPanel.svelte';
-	import { workspaceAction, deleteWorkspace } from '$lib/shared/api/client';
+	import { workspaceAction, deleteWorkspace, getWorkspace } from '$lib/shared/api/client';
 	import { connectTerminalWS } from '$lib/shared/api/websocket';
 	import { createTerminal } from '$lib/platform/terminal';
 
 	let { data } = $props();
 
 	let terminalEl: HTMLDivElement | undefined = $state();
+	let creationDone = $state(false);
+	const isCreating = $derived(!creationDone && (!data.workspace || data.workspace.status === 'creating'));
+
+	async function handleCreationReady() {
+		// Refresh workspace data then switch to terminal view
+		try {
+			const ws = await getWorkspace(data.workspaceId);
+			data.workspace = ws;
+		} catch {
+			// workspace may still be initializing, retry
+		}
+		creationDone = true;
+	}
 
 	$effect(() => {
-		if (!terminalEl) return;
+		if (!terminalEl || isCreating) return;
 
 		const { terminal, fit, dispose } = createTerminal(terminalEl);
 		const ws = connectTerminalWS(data.workspaceId);
@@ -81,14 +95,20 @@
 		</div>
 	</div>
 
-	<!-- Main content: Terminal + Agent Panel -->
-	<div class="grid flex-1 gap-4 lg:grid-cols-[1fr_320px]">
-		<div class="overflow-hidden rounded-xl border border-border" style="background:#0f172a">
-			<div bind:this={terminalEl} class="h-full min-h-[400px] w-full"></div>
+	<!-- Main content: Progress or Terminal + Agent Panel -->
+	{#if isCreating}
+		<div class="flex-1 overflow-hidden rounded-xl border border-border bg-surface">
+			<CreationProgress workspaceId={data.workspaceId} onready={handleCreationReady} />
 		</div>
+	{:else}
+		<div class="grid flex-1 gap-4 lg:grid-cols-[1fr_320px]">
+			<div class="overflow-hidden rounded-xl border border-border" style="background:#0f172a">
+				<div bind:this={terminalEl} class="h-full min-h-[400px] w-full"></div>
+			</div>
 
-		<div class="overflow-hidden rounded-xl border border-border bg-surface">
-			<AgentPanel workspaceId={data.workspaceId} />
+			<div class="overflow-hidden rounded-xl border border-border bg-surface">
+				<AgentPanel workspaceId={data.workspaceId} />
+			</div>
 		</div>
-	</div>
+	{/if}
 </div>

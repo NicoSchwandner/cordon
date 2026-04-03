@@ -16,6 +16,7 @@ import (
 	"github.com/nicobistolfi/cordon/internal/api/middleware"
 	apiws "github.com/nicobistolfi/cordon/internal/api/ws"
 	"github.com/nicobistolfi/cordon/internal/application/audit"
+	"github.com/nicobistolfi/cordon/internal/application/progress"
 	"github.com/nicobistolfi/cordon/internal/application/proxy"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/devcontainer"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/docker"
@@ -64,11 +65,18 @@ func main() {
 		vault.AddSecret(tenantID, "GITHUB_TOKEN", "cordon-placeholder-github-token", githubToken)
 	}
 
+	// Progress tracking
+	timingStore := progress.NewTimingStore("data/build-timings.json")
+	progressStore := progress.NewStore(timingStore)
+
 	// Workspace orchestrator (Docker)
 	var workspaceProvider *docker.Provider
 	workspaceProvider, err = docker.NewProvider(dcBuilder, githubToken)
 	if err != nil {
 		log.Printf("WARNING: Docker not available, workspace features disabled: %v", err)
+	}
+	if workspaceProvider != nil {
+		workspaceProvider.SetProgressStore(progressStore)
 	}
 
 	// Application services
@@ -109,8 +117,13 @@ func main() {
 	proxyHandler := handlers.NewProxyHandler(pipeline)
 	auditHandler := handlers.NewAuditHandler(auditService)
 	approvalHandler := handlers.NewApprovalHandler(approvalStore)
-	workspaceHandler := handlers.NewWorkspaceHandler(workspaceProvider)
+	workspaceHandler := handlers.NewWorkspaceHandler(workspaceProvider, progressStore)
 	secretHandler := handlers.NewSecretHandler(vault)
+
+	var githubHandler *handlers.GitHubHandler
+	if workspaceProvider != nil {
+		githubHandler = handlers.NewGitHubHandler(workspaceProvider.ResolveDefaultBranch)
+	}
 
 	// Router
 	mux := http.NewServeMux()
@@ -137,9 +150,15 @@ func main() {
 	mux.Handle("GET /api/secrets/", authMW(http.HandlerFunc(secretHandler.Reveal)))
 	mux.Handle("DELETE /api/secrets/", authMW(http.HandlerFunc(secretHandler.Delete)))
 
+	// GitHub API proxy
+	if githubHandler != nil {
+		mux.Handle("GET /api/github/default-branch", authMW(http.HandlerFunc(githubHandler.DefaultBranch)))
+	}
+
 	// Workspaces
 	mux.Handle("POST /api/workspaces", authMW(http.HandlerFunc(workspaceHandler.Create)))
 	mux.Handle("GET /api/workspaces", authMW(http.HandlerFunc(workspaceHandler.List)))
+	mux.Handle("GET /api/workspaces/{id}/logs", authMW(http.HandlerFunc(workspaceHandler.CreationLogs)))
 	mux.Handle("GET /api/workspaces/", authMW(http.HandlerFunc(workspaceHandler.Get)))
 	mux.Handle("DELETE /api/workspaces/", authMW(http.HandlerFunc(workspaceHandler.Delete)))
 	mux.Handle("POST /api/workspaces/{id}/{action}", authMW(http.HandlerFunc(workspaceHandler.Action)))

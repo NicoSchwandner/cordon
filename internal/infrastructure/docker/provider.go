@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -18,6 +19,7 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/client"
 	"github.com/google/uuid"
+	"github.com/nicobistolfi/cordon/internal/application/progress"
 	"github.com/nicobistolfi/cordon/internal/domain"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/devcontainer"
 )
@@ -31,10 +33,12 @@ type gitIdentity struct {
 // Provider manages Docker-based workspaces.
 // Container labels are the source of truth — no in-memory state survives restarts.
 type Provider struct {
-	client  *client.Client
-	builder *devcontainer.Builder // nil = bare containers only
-	token   string                // GitHub token for authenticated git operations
-	gitUser *gitIdentity          // resolved from GitHub API at startup
+	client          *client.Client
+	builder         *devcontainer.Builder // nil = bare containers only
+	token           string                // GitHub token for authenticated git operations
+	gitUser         *gitIdentity          // resolved from GitHub API at startup
+	defaultBranches sync.Map              // repo URL -> default branch name
+	progress        *progress.Store       // optional progress event emitter
 }
 
 // NewProvider creates a Docker workspace provider.
@@ -71,6 +75,11 @@ func NewProvider(builder *devcontainer.Builder, token string) (*Provider, error)
 	return p, nil
 }
 
+// SetProgressStore attaches a progress store for emitting creation events.
+func (p *Provider) SetProgressStore(s *progress.Store) {
+	p.progress = s
+}
+
 func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
 	if config.Repo != "" && p.builder != nil {
 		return p.createFromRepo(ctx, tenantID, config)
@@ -80,7 +89,10 @@ func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain
 
 // createBare creates a container from the default base image (no repo).
 func (p *Provider) createBare(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
-	wsID := uuid.New()
+	wsID := config.ID
+	if wsID == uuid.Nil {
+		wsID = uuid.New()
+	}
 	containerName := p.containerName(config.Name, wsID)
 	now := time.Now().UTC()
 
@@ -110,15 +122,30 @@ func (p *Provider) createBare(ctx context.Context, tenantID uuid.UUID, config do
 
 // createFromRepo builds a devcontainer image, creates a container, clones the repo inside, and runs setup.
 func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
-	wsID := uuid.New()
+	wsID := config.ID
+	if wsID == uuid.Nil {
+		wsID = uuid.New()
+	}
 	containerName := p.containerName(config.Name, wsID)
 	now := time.Now().UTC()
+	start := time.Now()
+
+	emit := func(step, msg string) {
+		if p.progress != nil {
+			p.progress.Send(wsID, step, msg)
+		}
+	}
+
+	// Send first event with time estimate
+	if p.progress != nil {
+		p.progress.SendWithEstimate(wsID, config.Repo, "resolving_branch", "Resolving branch...")
+	}
 
 	// BaseBranch = build the devcontainer image from (where devcontainer.json lives)
 	// Branch = checkout this branch in the workspace
 	branch := config.Branch
 	if branch == "" {
-		branch = "development"
+		branch = p.ResolveDefaultBranch(config.Repo)
 	}
 	baseBranch := config.BaseBranch
 	if baseBranch == "" {
@@ -128,12 +155,17 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 	log.Printf("[workspace] creating devcontainer %s from %s (base=%s, branch=%s)", containerName, config.Repo, baseBranch, branch)
 
 	// Build the devcontainer image from the base branch
+	emit("building_image", "Building devcontainer image...")
 	result, err := p.builder.Build(ctx, config.Repo, baseBranch, p.token, config.DevcontainerPath)
 	if err != nil {
 		return domain.Workspace{}, fmt.Errorf("building devcontainer image: %w", err)
 	}
+	if result.Cached {
+		emit("building_image", "Using cached image")
+	}
 
 	// Create network
+	emit("creating_container", "Creating container...")
 	networkID, err := p.createNetwork(ctx, containerName, tenantID, wsID)
 	if err != nil {
 		return domain.Workspace{}, err
@@ -171,6 +203,7 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 	cid := ws.ID.String()[:12]
 
 	// Configure git: credential helper + user identity
+	emit("configuring_git", "Configuring git credentials...")
 	if p.token != "" {
 		credHelper := `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'`
 		if _, err := p.execInContainer(ctx, cid, credHelper); err != nil {
@@ -185,6 +218,7 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 	}
 
 	// Clone repo inside the running container
+	emit("cloning_repo", fmt.Sprintf("Cloning repository (branch: %s)...", branch))
 	cloneURL := p.cloneURL(config.Repo)
 	log.Printf("[workspace] cloning repo inside container (branch=%s)", branch)
 	cloneCmd := fmt.Sprintf("git clone --branch %s %s %s", branch, cloneURL, result.WorkspaceFolder)
@@ -192,6 +226,7 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 		if branch != baseBranch {
 			// Branch doesn't exist yet — clone from base branch, then create the feature branch
 			log.Printf("[workspace] branch %s not found, cloning %s and creating branch", branch, baseBranch)
+			emit("cloning_repo", fmt.Sprintf("Branch %s not found, cloning %s and creating branch...", branch, baseBranch))
 			fallbackCmd := fmt.Sprintf("git clone --branch %s %s %s", baseBranch, cloneURL, result.WorkspaceFolder)
 			if _, err := p.execInContainer(ctx, cid, fallbackCmd); err != nil {
 				log.Printf("[workspace] warning: clone failed: %v", err)
@@ -207,12 +242,20 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 	}
 
 	// Run postCreateCommand
+	if len(result.PostCreateCommand) > 0 {
+		emit("post_create", "Running post-create commands...")
+	}
 	for _, cmd := range result.PostCreateCommand {
 		log.Printf("[workspace] running postCreateCommand: %s", cmd)
 		shellCmd := fmt.Sprintf("cd %s && %s", result.WorkspaceFolder, cmd)
 		if _, err := p.execInContainer(ctx, ws.ID.String()[:12], shellCmd); err != nil {
 			log.Printf("[workspace] warning: postCreateCommand failed: %v", err)
 		}
+	}
+
+	// Record build timing for future estimates
+	if p.progress != nil && p.progress.Timing() != nil {
+		p.progress.Timing().Record(config.Repo, time.Since(start))
 	}
 
 	log.Printf("[workspace] %s is ready", containerName)
@@ -599,6 +642,79 @@ func fetchGitHubUser(token string) (*gitIdentity, error) {
 	}
 
 	return &gitIdentity{Name: name, Email: email}, nil
+}
+
+// ResolveDefaultBranch returns the default branch for a repo, querying GitHub API
+// and caching the result. Falls back to "main" on any error.
+func (p *Provider) ResolveDefaultBranch(repoURL string) string {
+	if cached, ok := p.defaultBranches.Load(repoURL); ok {
+		return cached.(string)
+	}
+
+	branch := "main"
+	if p.token != "" {
+		if owner, repo, err := parseOwnerRepo(repoURL); err == nil {
+			if b, err := fetchDefaultBranch(p.token, owner, repo); err == nil {
+				branch = b
+			} else {
+				log.Printf("[workspace] warning: could not detect default branch for %s: %v", repoURL, err)
+			}
+		}
+	}
+
+	p.defaultBranches.Store(repoURL, branch)
+	return branch
+}
+
+// parseOwnerRepo extracts owner and repo from a GitHub URL.
+// Handles: "github.com/org/repo", "https://github.com/org/repo.git", etc.
+func parseOwnerRepo(repoURL string) (string, string, error) {
+	raw := repoURL
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", err
+	}
+	if !strings.Contains(u.Host, "github.com") {
+		return "", "", fmt.Errorf("not a GitHub URL: %s", repoURL)
+	}
+	path := strings.Trim(u.Path, "/")
+	path = strings.TrimSuffix(path, ".git")
+	parts := strings.SplitN(path, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", fmt.Errorf("cannot parse owner/repo from %s", repoURL)
+	}
+	return parts[0], parts[1], nil
+}
+
+// fetchDefaultBranch queries the GitHub API for a repository's default branch.
+func fetchDefaultBranch(token, owner, repo string) (string, error) {
+	req, _ := http.NewRequest("GET", fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo), nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+	}
+
+	var result struct {
+		DefaultBranch string `json:"default_branch"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", err
+	}
+	if result.DefaultBranch == "" {
+		return "main", nil
+	}
+	return result.DefaultBranch, nil
 }
 
 func sanitizeContainerName(name string) string {

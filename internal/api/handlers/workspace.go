@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -11,15 +12,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/nicobistolfi/cordon/internal/api/middleware"
 	"github.com/nicobistolfi/cordon/internal/application/ports"
+	"github.com/nicobistolfi/cordon/internal/application/progress"
 	"github.com/nicobistolfi/cordon/internal/domain"
 )
 
 type WorkspaceHandler struct {
-	service ports.WorkspaceService
+	service  ports.WorkspaceService
+	progress *progress.Store
 }
 
-func NewWorkspaceHandler(service ports.WorkspaceService) *WorkspaceHandler {
-	return &WorkspaceHandler{service: service}
+func NewWorkspaceHandler(service ports.WorkspaceService, ps *progress.Store) *WorkspaceHandler {
+	return &WorkspaceHandler{service: service, progress: ps}
 }
 
 type CreateWorkspaceRequest struct {
@@ -88,6 +91,42 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Branch:           req.Branch,
 	}
 
+	// Repo-based workspaces: create asynchronously so we can stream progress
+	if config.Repo != "" && h.progress != nil {
+		wsID := uuid.New()
+		config.ID = wsID
+		now := time.Now().UTC()
+
+		h.progress.Create(wsID)
+
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			defer cancel()
+
+			ws, err := h.service.Create(ctx, tenantID, config)
+			if err != nil {
+				log.Printf("[workspace] create failed: %v", err)
+			}
+			_ = ws
+			h.progress.Complete(wsID, err)
+		}()
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(WorkspaceResponse{
+			ID:        wsID.String(),
+			TenantID:  tenantID.String(),
+			Name:      config.Name,
+			Status:    string(domain.WorkspaceCreating),
+			Repo:      config.Repo,
+			Branch:    config.Branch,
+			CreatedAt: now.Format(time.RFC3339),
+			ExpiresAt: now.Add(config.MaxLifetime).Format(time.RFC3339),
+		})
+		return
+	}
+
+	// Bare workspaces: create synchronously (fast)
 	ws, err := h.service.Create(r.Context(), tenantID, config)
 	if err != nil {
 		log.Printf("[workspace] create failed: %v", err)
@@ -218,6 +257,60 @@ func (h *WorkspaceHandler) Action(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte(`{"status":"ok"}`))
+}
+
+// CreationLogs streams workspace creation progress as Server-Sent Events.
+func (h *WorkspaceHandler) CreationLogs(w http.ResponseWriter, r *http.Request) {
+	// Parse: /api/workspaces/{id}/logs
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/workspaces/"), "/")
+	if len(parts) < 2 {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	wsID, err := uuid.Parse(parts[0])
+	if err != nil {
+		http.Error(w, "invalid workspace ID", http.StatusBadRequest)
+		return
+	}
+
+	ch, ok := h.progress.Subscribe(wsID)
+	if !ok {
+		// No in-flight creation — send a single done event
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.Header().Set("Connection", "keep-alive")
+		evt := progress.Event{Step: "done", Message: "Workspace ready!", Done: true}
+		data, _ := json.Marshal(evt)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	ctx := r.Context()
+	for {
+		select {
+		case evt, open := <-ch:
+			if !open {
+				return
+			}
+			data, _ := json.Marshal(evt)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
+			if evt.Done {
+				return
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func extractWorkspaceID(path string) (uuid.UUID, error) {

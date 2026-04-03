@@ -95,6 +95,14 @@ export interface SetSecretRequest {
   value: string;
 }
 
+export interface ProgressEvent {
+  step: string;
+  message: string;
+  done: boolean;
+  error?: string;
+  estimated_secs?: number;
+}
+
 export interface ProblemDetails {
   type: string;
   title: string;

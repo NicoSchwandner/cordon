@@ -12,6 +12,9 @@ web/build/
 dist/
 *.tsbuildinfo
 
+# Runtime data
+data/
+
 # Environment
 .env
 .env.*

@@ -17,30 +17,24 @@ The devcontainer provisioning flow (clone, fallback branch creation, git credent
 
 ### Creation Progress Feedback
 
-**Status:** Needed
+**Status:** Done
 **Impact:** UX — the POST blocks for 1-4 minutes with zero feedback
 
-Creating a workspace from a repo is synchronous. The frontend shows "Creating..." but has no visibility into what's happening (cloning, building image, running postCreateCommand). Users don't know if it's stuck or working.
-
-**Planned approach:** Stream build logs to the frontend during creation. Options: SSE endpoint, or WebSocket that streams logs while the POST runs in the background. See also "Async Workspace Creation with Progress" below for the full async solution.
+**Implementation:** `POST /api/workspaces` now returns immediately (HTTP 202) for repo-based workspaces and runs creation in a background goroutine. Progress events stream via SSE at `GET /api/workspaces/{id}/logs`. The frontend shows a progress bar with estimated time remaining (based on historical build durations stored in `data/build-timings.json`) and a step-by-step checklist.
 
 ### Image Caching
 
-**Status:** Needed
+**Status:** Done
 **Impact:** Repeated creates from the same repo rebuild the devcontainer image every time
 
-Docker layer caching helps, but the full `devcontainer build` cycle still runs (clone to tmpdir, invoke CLI, etc.) even when nothing changed. First build is ~1-4 min, subsequent builds ~15-30s due to layer cache, but this could be near-instant.
-
-**Planned approach:** Cache built images by `repo:branch:devcontainer-hash`. Before building, check if a cached image exists and the devcontainer.json hasn't changed. Skip the build entirely if cache is valid. Invalidation: on push to branch (webhook) or TTL-based.
+**Implementation:** Image tags now include a hash of the devcontainer.json content (`repo:branch:config-hash`). Before building, the system checks if the image already exists via `docker image inspect`. If found, the build is skipped entirely — taking the creation time from minutes down to seconds for repeat builds. Config changes automatically invalidate the cache.
 
 ### Default Branch Detection
 
-**Status:** Needed
+**Status:** Done
 **Impact:** Base branch defaults to "development" which is Wint-specific
 
-When base branch is left empty, the system defaults to "development". Other companies use "main", "master", or custom default branches.
-
-**Planned approach:** Query GitHub API (`GET /repos/{owner}/{repo}`) to read the `default_branch` field. Cache per-repo. Fall back to "main" if the API call fails.
+**Implementation:** When base branch is left empty, the system queries the GitHub API (`GET /repos/{owner}/{repo}`) to read the `default_branch` field. Results are cached per-repo for the server lifetime. Falls back to "main" if the API call fails or no GitHub token is configured. The frontend fetches the detected default branch (debounced) and shows it as the placeholder. Exposed via `GET /api/github/default-branch?repo=...`.
 
 ### AI Agent Configuration Parity
 
@@ -64,12 +58,9 @@ The goal: a developer creates a workspace and Claude Code works identically to t
 
 ## Async Workspace Creation with Progress
 
-**Status:** Deferred
-**Impact:** UX — workspace creation from repo can take 2-5 minutes
+**Status:** Done (see "Creation Progress Feedback" above)
 
-Currently, `POST /api/workspaces` is synchronous. The frontend blocks with a spinner. This is acceptable for single-user dev, but won't scale.
-
-**Planned approach:** Background goroutine + status polling or SSE. The workspace would be created with `status: creating`, and the frontend polls `GET /api/workspaces/{id}` until it transitions to `running`. Build logs streamed via SSE endpoint.
+Workspace creation from repo is now async with SSE progress streaming, estimated time countdown, and step-by-step progress UI.
 
 ## Docker Compose Sidecars (SQL Server, etc.)
 
@@ -102,12 +93,9 @@ This follows the GitHub Codespaces model: one Codespace per repo.
 
 ## Image Caching
 
-**Status:** Deferred
-**Impact:** Repeated `devcontainer build` for the same repo+branch is wasteful
+**Status:** Done (see "Image Caching" in Near-Term section above)
 
-Currently, every workspace creation runs `devcontainer build` from scratch. The devcontainer CLI has some Docker layer caching, but the clone + build cycle still takes time.
-
-**Planned approach:** Cache built images by `repo:branch:devcontainer-hash`. On workspace create, check if a cached image exists and is still valid (devcontainer.json hasn't changed). If valid, skip the build. Invalidation: webhook on push to branch, or TTL-based.
+Images are cached by `repo:branch:devcontainer-config-hash`. Webhook-based invalidation is future work.
 
 ## MCP Proxy Support
 

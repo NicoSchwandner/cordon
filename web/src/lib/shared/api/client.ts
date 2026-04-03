@@ -4,6 +4,7 @@ import type {
   ApprovalDecisionRequest,
   HTTPProxyRequest,
   ProblemDetails,
+  ProgressEvent,
   ProxyResult,
   SQLProxyRequest,
   SecretRef,
@@ -103,6 +104,33 @@ export function workspaceAction(
 
 export function getHealth(): Promise<{ status: string }> {
   return fetchJSON("GET", "/health");
+}
+
+export function connectCreationSSE(
+  workspaceId: string,
+  onEvent: (event: ProgressEvent) => void,
+): () => void {
+  const source = new EventSource(`/api/workspaces/${workspaceId}/logs`);
+  source.onmessage = (e) => {
+    try {
+      const event: ProgressEvent = JSON.parse(e.data);
+      onEvent(event);
+      if (event.done) source.close();
+    } catch {
+      /* ignore parse errors */
+    }
+  };
+  source.onerror = () => source.close();
+  return () => source.close();
+}
+
+export function getDefaultBranch(
+  repo: string,
+): Promise<{ default_branch: string }> {
+  return fetchJSON(
+    "GET",
+    `/api/github/default-branch?repo=${encodeURIComponent(repo)}`,
+  );
 }
 
 export function listSecrets(): Promise<SecretRef[]> {
