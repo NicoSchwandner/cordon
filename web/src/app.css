@@ -33,6 +33,10 @@
   font-display: swap;
 }
 
+html {
+  overflow-x: hidden;
+}
+
 body {
   color: var(--color-foreground);
   font-family: var(--font-sans);

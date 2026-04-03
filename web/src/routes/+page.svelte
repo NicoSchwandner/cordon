@@ -16,6 +16,7 @@
 	let showForm = $state(false);
 	let newName = $state('');
 	let creating = $state(false);
+	let wsMode: 'dev' | 'investigation' = $state('dev');
 	let extraWorkspaces: WorkspaceResponse[] = $state([]);
 	const workspaces = $derived([...extraWorkspaces, ...data.workspaces]);
 
@@ -42,6 +43,7 @@
 			branchSearch: '',
 			showRepoDropdown: false,
 			showBranchDropdown: false,
+			serviceContainer: false,
 		};
 	}
 
@@ -71,19 +73,29 @@
 	}
 
 	async function handleCreate() {
-		if (!picker) return;
-		const repoConfigs = picker.getRepoConfigs();
-		const primaryName = picker.getPrimaryName();
-		const name = newName.trim() || primaryName || 'workspace';
-
 		creating = true;
 		try {
-			const req: import('$lib/shared/api/types').CreateWorkspaceRequest = { name };
-			if (repoConfigs.length > 0) {
-				req.repos = repoConfigs;
+			if (wsMode === 'investigation') {
+				if (!org) {
+					alert('Load a GitHub organization first');
+					creating = false;
+					return;
+				}
+				const name = newName.trim() || `investigate-${org}`;
+				const ws = await createWorkspace({ name, mode: 'investigation', org });
+				window.location.href = `/workspace/${ws.id}`;
+			} else {
+				if (!picker) return;
+				const repoConfigs = picker.getRepoConfigs();
+				const primaryName = picker.getPrimaryName();
+				const name = newName.trim() || primaryName || 'workspace';
+				const req: import('$lib/shared/api/types').CreateWorkspaceRequest = { name };
+				if (repoConfigs.length > 0) {
+					req.repos = repoConfigs;
+				}
+				const ws = await createWorkspace(req);
+				window.location.href = `/workspace/${ws.id}`;
 			}
-			const ws = await createWorkspace(req);
-			window.location.href = `/workspace/${ws.id}`;
 		} catch (e) {
 			alert(e instanceof Error ? e.message : 'Failed to create workspace');
 		}
@@ -130,10 +142,24 @@
 				}}
 				class="mb-4 space-y-3 rounded-xl border border-border bg-surface p-4"
 			>
+				<!-- Mode toggle -->
+				<div class="flex rounded-lg border border-border-input overflow-hidden w-fit">
+					<button
+						type="button"
+						onclick={() => (wsMode = 'dev')}
+						class="px-4 py-1.5 text-sm font-medium transition-colors {wsMode === 'dev' ? 'bg-primary text-on-primary' : 'bg-surface text-foreground-secondary hover:bg-hover-subtle'}"
+					>Development</button>
+					<button
+						type="button"
+						onclick={() => (wsMode = 'investigation')}
+						class="px-4 py-1.5 text-sm font-medium transition-colors {wsMode === 'investigation' ? 'bg-primary text-on-primary' : 'bg-surface text-foreground-secondary hover:bg-hover-subtle'}"
+					>Investigation</button>
+				</div>
+
 				<!-- Org selector -->
 				<div>
 					<label for="org-input" class="mb-1 block text-xs font-medium text-foreground-muted">
-						GitHub Organization <span class="font-normal text-foreground-faint">(optional — enables repo picker)</span>
+						GitHub Organization {#if wsMode === 'dev'}<span class="font-normal text-foreground-faint">(optional — enables repo picker)</span>{:else}<span class="font-normal text-foreground-faint">(required — all repos will be shallow-cloned)</span>{/if}
 					</label>
 					<div class="flex gap-2">
 						<input
@@ -165,7 +191,8 @@
 					{/if}
 				</div>
 
-				<!-- Repo rows -->
+				<!-- Repo rows (dev mode only) -->
+				{#if wsMode === 'dev'}
 				<div>
 					<label class="mb-1 block text-xs font-medium text-foreground-muted">
 						Repositories <span class="font-normal text-foreground-faint">(optional — leave empty for bare container)</span>
@@ -177,6 +204,14 @@
 						bind:rows={repoRows}
 					/>
 				</div>
+				{:else if org && orgRepos.length > 0}
+				<div class="rounded-lg border border-border-subtle bg-surface-raised p-3">
+					<p class="text-sm text-foreground-secondary">
+						Will shallow-clone <strong>{orgRepos.filter(r => !r.archived).length}</strong> repos from <strong>{org}</strong> for code search.
+						You can activate individual repos later for full development.
+					</p>
+				</div>
+				{/if}
 
 				<div>
 					<label for="ws-name" class="mb-1 block text-xs font-medium text-foreground-muted">Name <span class="font-normal text-foreground-faint">(auto-fills from primary repo if empty)</span></label>
@@ -187,7 +222,9 @@
 						class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
 					/>
 				</div>
-				{#if picker && picker.getRepoConfigs().length > 0}
+				{#if wsMode === 'investigation'}
+					<p class="text-xs text-foreground-faint">Shallow cloning all repos may take a minute depending on org size.</p>
+				{:else if picker && picker.getRepoConfigs().length > 0}
 					<p class="text-xs text-foreground-faint">Building from devcontainer may take a few minutes on first run.</p>
 				{/if}
 				<div class="flex gap-2">
@@ -226,9 +263,24 @@
 					>
 						<div class="mb-2 flex items-center justify-between">
 							<span class="font-medium text-foreground">{ws.name}</span>
-							<StatusDot status={ws.status} />
+							<div class="flex items-center gap-2">
+								{#if ws.mode === 'investigation'}
+									<span class="rounded-full bg-info-badge-bg px-2 py-0.5 text-xs text-info-text">Investigation</span>
+								{:else if ws.spawned_from}
+									<span class="rounded-full bg-surface-raised px-2 py-0.5 text-xs text-foreground-faint">from investigation</span>
+								{/if}
+								<StatusDot status={ws.status} />
+							</div>
 						</div>
-						{#if primary}
+						{#if ws.investigation}
+							<div class="mb-1 text-xs text-foreground-secondary">{ws.investigation.catalog_org}</div>
+							<div class="flex items-center gap-2 text-xs text-foreground-faint">
+								<span>{ws.investigation.shallow_repos?.length || 0} repos</span>
+								{#if ws.investigation.activated_repos?.length}
+									<span class="rounded-full bg-success-badge-bg px-1.5 py-0.5 text-success-text">{ws.investigation.activated_repos.length} activated</span>
+								{/if}
+							</div>
+						{:else if primary}
 							<div class="mb-1 truncate text-xs font-mono text-foreground-secondary">{primary.url}</div>
 							<div class="flex items-center gap-2">
 								<span class="text-xs text-foreground-faint">{primary.branch || 'main'}</span>

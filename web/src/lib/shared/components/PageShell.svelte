@@ -73,7 +73,7 @@
 		</div>
 	</nav>
 
-	<main class="min-w-0 flex-1 bg-page overflow-auto">
+	<main class="min-w-0 flex-1 bg-page overflow-y-auto overflow-x-hidden">
 		<div class="p-6 md:p-8">
 			{@render children()}
 		</div>

@@ -66,3 +66,32 @@ func TestHasRepos(t *testing.T) {
 		t.Error("expected true for non-empty repos")
 	}
 }
+
+func TestIsInvestigation(t *testing.T) {
+	if (WorkspaceConfig{}).IsInvestigation() {
+		t.Error("expected false for default mode")
+	}
+	if (WorkspaceConfig{Mode: WorkspaceModeDev}).IsInvestigation() {
+		t.Error("expected false for dev mode")
+	}
+	if !(WorkspaceConfig{Mode: WorkspaceModeInvestigation}).IsInvestigation() {
+		t.Error("expected true for investigation mode")
+	}
+}
+
+func TestInvestigationStateIsActivated(t *testing.T) {
+	state := &InvestigationState{
+		ShallowRepos:   []string{"github.com/org/a", "github.com/org/b", "github.com/org/c"},
+		ActivatedRepos: []string{"github.com/org/b"},
+	}
+
+	if !state.IsActivated("github.com/org/b") {
+		t.Error("expected b to be activated")
+	}
+	if state.IsActivated("github.com/org/a") {
+		t.Error("expected a to not be activated")
+	}
+	if state.IsActivated("github.com/org/unknown") {
+		t.Error("expected unknown to not be activated")
+	}
+}

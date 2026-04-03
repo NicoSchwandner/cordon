@@ -94,6 +94,15 @@ func (s *Store) Complete(id uuid.UUID, err error) {
 	close(ch)
 }
 
+// CreateIfAbsent registers a progress channel only if one doesn't already exist.
+// Used for activation progress on existing workspaces.
+func (s *Store) CreateIfAbsent(id uuid.UUID) <-chan Event {
+	if ch, ok := s.Subscribe(id); ok {
+		return ch
+	}
+	return s.Create(id)
+}
+
 // Timing returns the underlying timing store, or nil.
 func (s *Store) Timing() *TimingStore {
 	return s.timing

@@ -74,18 +74,29 @@ export interface RepoConfig {
   service_container?: boolean;
 }
 
+export interface InvestigationState {
+  catalog_org: string;
+  shallow_repos: string[];
+  activated_repos: string[];
+}
+
 export interface WorkspaceResponse {
   id: string;
   tenant_id: string;
   name: string;
   status: string;
+  mode?: string;
+  spawned_from?: string;
   repos: RepoConfig[];
+  investigation?: InvestigationState;
   created_at: string;
   expires_at: string;
 }
 
 export interface CreateWorkspaceRequest {
   name: string;
+  mode?: "dev" | "investigation";
+  org?: string;
   repos?: RepoConfig[];
   devcontainer_path?: string;
   cpu?: number;

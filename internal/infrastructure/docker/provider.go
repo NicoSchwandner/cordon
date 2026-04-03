@@ -9,6 +9,8 @@ import (
 	"log"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -83,6 +85,9 @@ func (p *Provider) SetProgressStore(s *progress.Store) {
 }
 
 func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
+	if config.IsInvestigation() {
+		return p.createInvestigation(ctx, tenantID, config)
+	}
 	if config.HasRepos() && p.builder != nil {
 		return p.createFromRepos(ctx, tenantID, config)
 	}
@@ -439,6 +444,298 @@ EOF`, wsID.String(), tenantID.String())
 	return ws, nil
 }
 
+// createInvestigation creates a container with shallow clones of all repos from a GitHub org.
+func (p *Provider) createInvestigation(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
+	wsID := config.ID
+	if wsID == uuid.Nil {
+		wsID = uuid.New()
+	}
+	containerName := p.containerName(config.Name, wsID)
+	now := time.Now().UTC()
+
+	if config.Investigation == nil || config.Investigation.CatalogOrg == "" {
+		return domain.Workspace{}, fmt.Errorf("investigation workspace requires catalog org")
+	}
+	org := config.Investigation.CatalogOrg
+
+	emit := func(step, msg string) {
+		if p.progress != nil {
+			p.progress.Send(wsID, step, msg)
+		}
+	}
+
+	emit("listing_repos", fmt.Sprintf("Fetching repos from %s...", org))
+
+	// Fetch org repos, filter archived
+	if p.github == nil {
+		return domain.Workspace{}, fmt.Errorf("GitHub client not configured")
+	}
+	orgRepos, err := p.github.ListOrgRepos(org)
+	if err != nil {
+		return domain.Workspace{}, fmt.Errorf("listing org repos: %w", err)
+	}
+	var repoURLs []string
+	for _, r := range orgRepos {
+		if !r.Archived {
+			repoURLs = append(repoURLs, "github.com/"+r.FullName)
+		}
+	}
+	if len(repoURLs) == 0 {
+		return domain.Workspace{}, fmt.Errorf("no non-archived repos found in org %s", org)
+	}
+
+	log.Printf("[workspace] creating investigation workspace %s from %s (%d repos)", containerName, org, len(repoURLs))
+
+	// Pull base image (no devcontainer build)
+	image := "mcr.microsoft.com/devcontainers/base:ubuntu"
+	emit("pulling_image", "Pulling base image...")
+	p.pullImage(ctx, image)
+
+	// Create network
+	emit("creating_container", "Creating container...")
+	networkID, err := p.createNetwork(ctx, containerName, tenantID, wsID)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+
+	// Labels: investigation-specific
+	labels := p.baseLabels(tenantID, wsID, config.Name, now, config.MaxLifetime)
+	labels["cordon.mode"] = string(domain.WorkspaceModeInvestigation)
+	labels["cordon.org"] = org
+	shallowJSON, _ := json.Marshal(repoURLs)
+	labels["cordon.shallow-repos"] = string(shallowJSON)
+	labels["cordon.workspace-folder"] = "/workspace"
+
+	env := []string{
+		"ZT_WORKSPACE_ID=" + wsID.String(),
+		"ZT_TENANT_ID=" + tenantID.String(),
+	}
+	if p.token != "" {
+		env = append(env, "GITHUB_TOKEN="+p.token, "GH_TOKEN="+p.token)
+	}
+
+	ws, err := p.startContainer(ctx, containerName, image, labels, env, config, networkID, tenantID, wsID, now)
+	if err != nil {
+		p.client.NetworkRemove(ctx, networkID)
+		return domain.Workspace{}, err
+	}
+
+	cid := ws.ID.String()[:12]
+
+	// Configure git credentials
+	emit("configuring_git", "Configuring git credentials...")
+	if p.token != "" {
+		credHelper := `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'`
+		p.execInContainer(ctx, cid, credHelper)
+	}
+	if p.gitUser != nil {
+		gitCfg := fmt.Sprintf(`git config --global user.name "%s" && git config --global user.email "%s"`, p.gitUser.Name, p.gitUser.Email)
+		p.execInContainer(ctx, cid, gitCfg)
+	}
+
+	p.execInContainer(ctx, cid, "mkdir -p /workspace/.cordon")
+
+	// Parallel shallow clone with semaphore
+	const concurrency = 12
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var completed atomic.Int32
+	total := len(repoURLs)
+	var failedMu sync.Mutex
+	var failed []string
+
+	emit("cloning_repos", fmt.Sprintf("Cloning 0/%d repos...", total))
+
+	for _, repoURL := range repoURLs {
+		wg.Add(1)
+		go func(url string) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			shortName := domain.RepoShortName(url)
+			cloneURL := p.cloneURL(url)
+			cloneCmd := fmt.Sprintf("GIT_LFS_SKIP_SMUDGE=1 git clone --depth=1 --single-branch %s /workspace/%s", cloneURL, shortName)
+			if _, err := p.execInContainer(ctx, cid, cloneCmd); err != nil {
+				log.Printf("[workspace] warning: shallow clone of %s failed: %v", url, err)
+				failedMu.Lock()
+				failed = append(failed, shortName)
+				failedMu.Unlock()
+			}
+
+			n := completed.Add(1)
+			emit("cloning_repos", fmt.Sprintf("Cloning %d/%d repos...", n, total))
+		}(repoURL)
+	}
+	wg.Wait()
+
+	if len(failed) > 0 {
+		log.Printf("[workspace] %d repos failed to clone: %v", len(failed), failed)
+	}
+
+	// Install ripgrep for fast search
+	emit("installing_tools", "Installing ripgrep...")
+	p.execInContainer(ctx, cid, `which rg > /dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq ripgrep > /dev/null 2>&1)`)
+
+	// Write initial activated-repos file
+	p.execInContainer(ctx, cid, `echo '[]' > /workspace/.cordon/activated-repos.json`)
+
+	// Populate investigation state on the returned workspace
+	ws.Config.Mode = domain.WorkspaceModeInvestigation
+	ws.Config.Investigation = &domain.InvestigationState{
+		CatalogOrg:     org,
+		ShallowRepos:   repoURLs,
+		ActivatedRepos: []string{},
+	}
+
+	cloned := total - len(failed)
+	log.Printf("[workspace] investigation workspace %s ready (%d/%d repos cloned)", containerName, cloned, total)
+	return ws, nil
+}
+
+// ActivateRepo promotes a shallow-cloned repo in an investigation workspace by spinning up
+// a new service container with the repo's devcontainer (reuses Phase 2 infrastructure).
+func (p *Provider) ActivateRepo(ctx context.Context, tenantID, workspaceID uuid.UUID, repoURL string) error {
+	c, err := p.findContainer(ctx, tenantID, workspaceID)
+	if err != nil {
+		return fmt.Errorf("finding workspace: %w", err)
+	}
+
+	// Verify investigation mode
+	if c.Labels["cordon.mode"] != string(domain.WorkspaceModeInvestigation) {
+		return fmt.Errorf("workspace is not an investigation workspace")
+	}
+
+	// Verify repo is in the shallow list
+	var shallowRepos []string
+	if sr := c.Labels["cordon.shallow-repos"]; sr != "" {
+		json.Unmarshal([]byte(sr), &shallowRepos)
+	}
+	found := false
+	for _, u := range shallowRepos {
+		if u == repoURL || domain.RepoShortName(u) == repoURL {
+			repoURL = u // normalize to full URL
+			found = true
+			break
+		}
+	}
+	if !found {
+		return fmt.Errorf("repo %q not found in investigation workspace", repoURL)
+	}
+
+	shortName := domain.RepoShortName(repoURL)
+
+	emit := func(step, msg string) {
+		if p.progress != nil {
+			p.progress.Send(workspaceID, step, msg)
+		}
+	}
+
+	emit("activating_repo", fmt.Sprintf("Activating %s...", shortName))
+
+	// Build devcontainer image for this repo
+	if p.builder == nil {
+		return fmt.Errorf("devcontainer builder not available")
+	}
+
+	defaultBranch := p.ResolveDefaultBranch(repoURL)
+	emit("building_image", fmt.Sprintf("Building devcontainer for %s...", shortName))
+	result, err := p.builder.Build(ctx, repoURL, defaultBranch, p.token, "")
+	if err != nil {
+		return fmt.Errorf("building devcontainer for %s: %w", shortName, err)
+	}
+	if result.Cached {
+		emit("building_image", fmt.Sprintf("Using cached image for %s", shortName))
+	}
+
+	// Create a full workspace for this repo (appears on dashboard like any other)
+	newWSID := uuid.New()
+	now := time.Now().UTC()
+	maxLifetime := 24 * time.Hour
+	containerName := p.containerName(shortName, newWSID)
+	labels := p.baseLabels(tenantID, newWSID, shortName, now, maxLifetime)
+	labels["cordon.spawned-from"] = workspaceID.String() // link back to investigation workspace
+
+	// Single-repo config for proper workspace metadata
+	repoJSON, _ := json.Marshal([]domain.RepoConfig{{URL: repoURL, Branch: defaultBranch, Primary: true}})
+	labels["cordon.repos"] = string(repoJSON)
+
+	emit("creating_workspace", fmt.Sprintf("Starting workspace for %s...", shortName))
+
+	// Create network
+	_, err = p.createNetwork(ctx, containerName, tenantID, newWSID)
+	if err != nil {
+		return fmt.Errorf("creating network: %w", err)
+	}
+	networkName := containerName + "-net"
+
+	env := []string{
+		"ZT_WORKSPACE_ID=" + newWSID.String(),
+		"ZT_TENANT_ID=" + tenantID.String(),
+	}
+	if p.token != "" {
+		env = append(env, "GITHUB_TOKEN="+p.token, "GH_TOKEN="+p.token)
+	}
+	for k, v := range result.Env {
+		env = append(env, k+"="+v)
+	}
+
+	err = p.startContainerRaw(ctx, startContainerOpts{
+		name:        containerName,
+		image:       result.ImageName,
+		labels:      labels,
+		env:         env,
+		networkName: networkName,
+		cpu:         2,
+		memoryMB:    4096,
+	})
+	if err != nil {
+		return fmt.Errorf("starting workspace container: %w", err)
+	}
+
+	// Clone repo (full, not shallow)
+	emit("cloning_repo", fmt.Sprintf("Cloning %s...", shortName))
+	cloneURL := p.cloneURL(repoURL)
+	cloneDir := "/workspace/" + shortName
+	if p.token != "" {
+		credHelper := `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'`
+		p.execInContainerByName(ctx, containerName, credHelper)
+	}
+	if p.gitUser != nil {
+		gitCfg := fmt.Sprintf(`git config --global user.name "%s" && git config --global user.email "%s"`, p.gitUser.Name, p.gitUser.Email)
+		p.execInContainerByName(ctx, containerName, gitCfg)
+	}
+	if _, err := p.execInContainerByName(ctx, containerName, "mkdir -p /workspace"); err != nil {
+		log.Printf("[workspace] warning: mkdir /workspace failed: %v", err)
+	}
+	cloneCmd := fmt.Sprintf("git clone --branch %s %s %s", defaultBranch, cloneURL, cloneDir)
+	if _, err := p.execInContainerByName(ctx, containerName, cloneCmd); err != nil {
+		return fmt.Errorf("cloning %s: %w", shortName, err)
+	}
+
+	// Run postCreateCommand
+	for _, cmd := range result.PostCreateCommand {
+		shellCmd := fmt.Sprintf("cd %s && %s", cloneDir, cmd)
+		if _, err := p.execInContainerByName(ctx, containerName, shellCmd); err != nil {
+			log.Printf("[workspace] warning: postCreateCommand for %s failed: %v", shortName, err)
+		}
+	}
+
+	// Update activated-repos.json in the investigation container
+	cid := c.ID[:12]
+	readCmd := `cat /workspace/.cordon/activated-repos.json 2>/dev/null || echo '[]'`
+	output, _ := p.execInContainerWithOutput(ctx, cid, readCmd)
+	var activated []string
+	json.Unmarshal([]byte(strings.TrimSpace(output)), &activated)
+	activated = append(activated, repoURL)
+	activatedJSON, _ := json.Marshal(activated)
+	writeCmd := fmt.Sprintf(`echo '%s' > /workspace/.cordon/activated-repos.json`, string(activatedJSON))
+	p.execInContainer(ctx, cid, writeCmd)
+
+	log.Printf("[workspace] activated %s as workspace %s (spawned from investigation %s)", shortName, newWSID.String()[:8], workspaceID.String()[:8])
+	return nil
+}
+
 // --- Shared helpers ---
 
 func (p *Provider) containerName(name string, wsID uuid.UUID) string {
@@ -598,6 +895,63 @@ func (p *Provider) execInContainer(ctx context.Context, containerIDPrefix, cmd s
 	}
 }
 
+// execInContainerWithOutput runs a shell command and returns its stdout.
+func (p *Provider) execInContainerWithOutput(ctx context.Context, containerIDPrefix, cmd string) (string, error) {
+	// Find full container ID
+	containers, err := p.client.ContainerList(ctx, container.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("label", "cordon.workspace")),
+	})
+	if err != nil {
+		return "", err
+	}
+	var containerID string
+	for _, c := range containers {
+		if strings.HasPrefix(c.ID, containerIDPrefix) || strings.HasPrefix(c.Labels["cordon.workspace"], containerIDPrefix) {
+			containerID = c.ID
+			break
+		}
+	}
+	if containerID == "" {
+		return "", fmt.Errorf("container not found")
+	}
+
+	execResp, err := p.client.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		Cmd:          []string{"sh", "-c", cmd},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return "", fmt.Errorf("creating exec: %w", err)
+	}
+
+	attach, err := p.client.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return "", fmt.Errorf("attaching exec: %w", err)
+	}
+	defer attach.Close()
+
+	var buf bytes.Buffer
+	// Docker multiplexes stdout/stderr with an 8-byte header per frame.
+	// stdcopy.StdCopy demuxes it, but for simple cases we can read raw
+	// since we only care about combined output.
+	_, _ = io.Copy(&buf, attach.Reader)
+
+	// Wait for exec to finish
+	for {
+		inspect, err := p.client.ContainerExecInspect(ctx, execResp.ID)
+		if err != nil {
+			return buf.String(), err
+		}
+		if !inspect.Running {
+			if inspect.ExitCode != 0 {
+				return buf.String(), fmt.Errorf("command exited with code %d", inspect.ExitCode)
+			}
+			return buf.String(), nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // execInContainerByName runs a shell command in a container identified by name.
 func (p *Provider) execInContainerByName(ctx context.Context, containerName, cmd string) (int, error) {
 	containers, err := p.client.ContainerList(ctx, container.ListOptions{
@@ -664,7 +1018,18 @@ func (p *Provider) Get(ctx context.Context, tenantID, workspaceID uuid.UUID) (do
 	if err != nil {
 		return domain.Workspace{}, err
 	}
-	return containerToWorkspace(c), nil
+	ws := containerToWorkspace(c)
+
+	// Enrich investigation state from in-container file (labels are immutable)
+	if ws.Config.Mode == domain.WorkspaceModeInvestigation && ws.Status == domain.WorkspaceRunning {
+		output, err := p.execInContainerWithOutput(ctx, c.ID[:12], `cat /workspace/.cordon/activated-repos.json 2>/dev/null || echo '[]'`)
+		if err == nil && ws.Config.Investigation != nil {
+			var activated []string
+			json.Unmarshal([]byte(strings.TrimSpace(output)), &activated)
+			ws.Config.Investigation.ActivatedRepos = activated
+		}
+	}
+	return ws, nil
 }
 
 func (p *Provider) List(ctx context.Context, tenantID uuid.UUID) ([]domain.Workspace, error) {
@@ -909,6 +1274,12 @@ func (p *Provider) findContainer(ctx context.Context, tenantID, workspaceID uuid
 	if err != nil {
 		return types.Container{}, fmt.Errorf("querying docker: %w", err)
 	}
+	// Return the primary container (skip service containers)
+	for _, c := range containers {
+		if _, isSvc := c.Labels["cordon.service-for"]; !isSvc {
+			return c, nil
+		}
+	}
 	if len(containers) == 0 {
 		return types.Container{}, fmt.Errorf("workspace not found")
 	}
@@ -943,17 +1314,39 @@ func containerToWorkspace(c types.Container) domain.Workspace {
 		json.Unmarshal([]byte(reposJSON), &repos)
 	}
 
-	return domain.Workspace{
+	config := domain.WorkspaceConfig{
+		Repos: repos,
+	}
+
+	// Populate investigation state from labels
+	if mode := c.Labels["cordon.mode"]; mode == string(domain.WorkspaceModeInvestigation) {
+		config.Mode = domain.WorkspaceModeInvestigation
+		var shallowRepos []string
+		if sr := c.Labels["cordon.shallow-repos"]; sr != "" {
+			json.Unmarshal([]byte(sr), &shallowRepos)
+		}
+		config.Investigation = &domain.InvestigationState{
+			CatalogOrg:   c.Labels["cordon.org"],
+			ShallowRepos: shallowRepos,
+			// ActivatedRepos populated by Get() via exec (labels are immutable)
+		}
+	}
+
+	ws := domain.Workspace{
 		ID:        wsID,
 		TenantID:  tenantID,
 		Name:      c.Labels["cordon.name"],
 		Status:    status,
 		CreatedAt: created,
 		ExpiresAt: expires,
-		Config: domain.WorkspaceConfig{
-			Repos: repos,
-		},
+		Config:    config,
 	}
+	if sf := c.Labels["cordon.spawned-from"]; sf != "" {
+		if id, err := uuid.Parse(sf); err == nil {
+			ws.SpawnedFrom = &id
+		}
+	}
+	return ws
 }
 
 // ResolveDefaultBranch returns the default branch for a repo, delegating to the shared GitHub client.

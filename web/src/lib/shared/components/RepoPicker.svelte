@@ -16,6 +16,7 @@
 		branchSearch: string;
 		showRepoDropdown: boolean;
 		showBranchDropdown: boolean;
+		serviceContainer: boolean;
 	};
 
 	interface Props {
@@ -41,6 +42,7 @@
 			branchSearch: '',
 			showRepoDropdown: false,
 			showBranchDropdown: false,
+			serviceContainer: false,
 		};
 	}
 
@@ -134,18 +136,15 @@
 		return rows
 			.filter(r => r.mode === 'org' ? r.selectedRepo != null : r.url.trim().length > 0)
 			.map((r, i) => {
-				if (r.mode === 'org' && r.selectedRepo) {
-					return {
-						url: `github.com/${r.selectedRepo.full_name}`,
-						branch: r.branch || undefined,
-						primary: i === 0,
-					};
-				}
-				return {
-					url: r.url.trim(),
+				const base = {
 					branch: r.branch || undefined,
 					primary: i === 0,
+					service_container: i > 0 && r.serviceContainer ? true : undefined,
 				};
+				if (r.mode === 'org' && r.selectedRepo) {
+					return { url: `github.com/${r.selectedRepo.full_name}`, ...base };
+				}
+				return { url: r.url.trim(), ...base };
 			});
 	}
 
@@ -212,6 +211,12 @@
 					<div class="mt-0.5 flex items-center gap-2">
 						{#if i === 0 && rows.filter(r => r.mode === 'org' ? r.selectedRepo : r.url.trim()).length > 1}
 							<span class="text-xs text-foreground-faint">primary</span>
+						{/if}
+						{#if i > 0}
+							<label class="flex items-center gap-1 text-xs text-foreground-faint cursor-pointer">
+								<input type="checkbox" bind:checked={row.serviceContainer} class="h-3 w-3 rounded accent-primary" />
+								Own container
+							</label>
 						{/if}
 						{#if org}
 							<button

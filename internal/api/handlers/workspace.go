@@ -36,6 +36,8 @@ type RepoConfigRequest struct {
 
 type CreateWorkspaceRequest struct {
 	Name             string              `json:"name"`
+	Mode             string              `json:"mode,omitempty"`
+	Org              string              `json:"org,omitempty"`
 	Repos            []RepoConfigRequest `json:"repos"`
 	DevcontainerPath string              `json:"devcontainer_path"`
 	CPU              int                 `json:"cpu"`
@@ -50,14 +52,23 @@ type RepoConfigResponse struct {
 	ServiceContainer bool   `json:"service_container,omitempty"`
 }
 
+type InvestigationStateResponse struct {
+	CatalogOrg     string   `json:"catalog_org"`
+	ShallowRepos   []string `json:"shallow_repos"`
+	ActivatedRepos []string `json:"activated_repos"`
+}
+
 type WorkspaceResponse struct {
-	ID        string               `json:"id"`
-	TenantID  string               `json:"tenant_id"`
-	Name      string               `json:"name"`
-	Status    string               `json:"status"`
-	Repos     []RepoConfigResponse `json:"repos"`
-	CreatedAt string               `json:"created_at"`
-	ExpiresAt string               `json:"expires_at"`
+	ID            string                        `json:"id"`
+	TenantID      string                        `json:"tenant_id"`
+	Name          string                        `json:"name"`
+	Status        string                        `json:"status"`
+	Mode          string                        `json:"mode,omitempty"`
+	SpawnedFrom   string                        `json:"spawned_from,omitempty"`
+	Repos         []RepoConfigResponse          `json:"repos"`
+	Investigation *InvestigationStateResponse    `json:"investigation,omitempty"`
+	CreatedAt     string                        `json:"created_at"`
+	ExpiresAt     string                        `json:"expires_at"`
 }
 
 func toWorkspaceResponse(ws domain.Workspace) WorkspaceResponse {
@@ -71,15 +82,27 @@ func toWorkspaceResponse(ws domain.Workspace) WorkspaceResponse {
 			ServiceContainer: r.ServiceContainer,
 		}
 	}
-	return WorkspaceResponse{
+	resp := WorkspaceResponse{
 		ID:        ws.ID.String(),
 		TenantID:  ws.TenantID.String(),
 		Name:      ws.Name,
 		Status:    string(ws.Status),
+		Mode:      string(ws.Config.Mode),
 		Repos:     repos,
 		CreatedAt: ws.CreatedAt.Format(time.RFC3339),
 		ExpiresAt: ws.ExpiresAt.Format(time.RFC3339),
 	}
+	if ws.SpawnedFrom != nil {
+		resp.SpawnedFrom = ws.SpawnedFrom.String()
+	}
+	if ws.Config.Investigation != nil {
+		resp.Investigation = &InvestigationStateResponse{
+			CatalogOrg:     ws.Config.Investigation.CatalogOrg,
+			ShallowRepos:   ws.Config.Investigation.ShallowRepos,
+			ActivatedRepos: ws.Config.Investigation.ActivatedRepos,
+		}
+	}
+	return resp
 }
 
 func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
@@ -126,8 +149,18 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		MaxLifetime:      24 * time.Hour,
 	}
 
-	// Repo-based workspaces: create asynchronously so we can stream progress
-	if config.HasRepos() && h.progress != nil {
+	// Investigation mode
+	if req.Mode == "investigation" {
+		if req.Org == "" {
+			http.Error(w, "org is required for investigation mode", http.StatusBadRequest)
+			return
+		}
+		config.Mode = domain.WorkspaceModeInvestigation
+		config.Investigation = &domain.InvestigationState{CatalogOrg: req.Org}
+	}
+
+	// Async creation: investigation workspaces or repo-based workspaces
+	if (config.IsInvestigation() || config.HasRepos()) && h.progress != nil {
 		wsID := uuid.New()
 		config.ID = wsID
 		now := time.Now().UTC()
@@ -155,17 +188,24 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(WorkspaceResponse{
+		resp := WorkspaceResponse{
 			ID:        wsID.String(),
 			TenantID:  tenantID.String(),
 			Name:      config.Name,
 			Status:    string(domain.WorkspaceCreating),
+			Mode:      string(config.Mode),
 			Repos:     respRepos,
 			CreatedAt: now.Format(time.RFC3339),
 			ExpiresAt: now.Add(config.MaxLifetime).Format(time.RFC3339),
-		})
+		}
+		if config.Investigation != nil {
+			resp.Investigation = &InvestigationStateResponse{
+				CatalogOrg: config.Investigation.CatalogOrg,
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(resp)
 		return
 	}
 
@@ -411,6 +451,78 @@ func (h *WorkspaceHandler) ExecInWorkspace(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(ExecResponse{
 		ExitCode: exitCode,
 		Output:   output,
+	})
+}
+
+type ActivateRepoRequest struct {
+	RepoURLs []string `json:"repo_urls"`
+	// Backwards compat: single repo
+	RepoURL string `json:"repo_url"`
+}
+
+// Activate triggers async repo activation in an investigation workspace.
+func (h *WorkspaceHandler) Activate(w http.ResponseWriter, r *http.Request) {
+	if h.service == nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Parse: /api/workspaces/{id}/activate
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/workspaces/"), "/")
+	if len(parts) < 2 {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	wsID, err := uuid.Parse(parts[0])
+	if err != nil {
+		http.Error(w, "invalid workspace ID", http.StatusBadRequest)
+		return
+	}
+
+	var req ActivateRepoRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// Normalize: support both single repo_url and batch repo_urls
+	urls := req.RepoURLs
+	if len(urls) == 0 && req.RepoURL != "" {
+		urls = []string{req.RepoURL}
+	}
+	if len(urls) == 0 {
+		http.Error(w, "repo_urls or repo_url is required", http.StatusBadRequest)
+		return
+	}
+
+	tenantID := middleware.TenantIDFromContext(r.Context())
+
+	// Register progress channel for activation SSE
+	if h.progress != nil {
+		h.progress.CreateIfAbsent(wsID)
+	}
+
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		defer cancel()
+
+		var lastErr error
+		for _, repoURL := range urls {
+			if err := h.service.ActivateRepo(ctx, tenantID, wsID, repoURL); err != nil {
+				log.Printf("[workspace] activate %s failed: %v", repoURL, err)
+				lastErr = err
+			}
+		}
+		if h.progress != nil {
+			h.progress.Complete(wsID, lastErr)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":    "activating",
+		"repo_urls": urls,
 	})
 }
 

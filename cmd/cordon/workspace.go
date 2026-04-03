@@ -21,7 +21,7 @@ func workspaceCmd() *cobra.Command {
 		Aliases: []string{"ws"},
 		Short:   "Manage workspaces",
 	}
-	cmd.AddCommand(wsCreateCmd(), wsListCmd(), wsDestroyCmd(), wsExecCmd(), wsCatalogCmd())
+	cmd.AddCommand(wsCreateCmd(), wsListCmd(), wsDestroyCmd(), wsExecCmd(), wsCatalogCmd(), wsActivateCmd())
 	return cmd
 }
 
@@ -62,6 +62,8 @@ type repoConfigJSON struct {
 func wsCreateCmd() *cobra.Command {
 	var repoFlags []string
 	var cpu, memMB int
+	var investigate bool
+	var org string
 
 	cmd := &cobra.Command{
 		Use:   "create [name]",
@@ -70,6 +72,9 @@ func wsCreateCmd() *cobra.Command {
 
 Use URL@branch syntax to specify branches per repo:
   cordon ws create my-feature --repo github.com/org/backend@DEV-123 --repo github.com/org/frontend@DEV-123
+
+Investigation mode shallow-clones an entire org for code search:
+  cordon ws create my-investigation --investigate --org WintDev
 
 The first --repo is the primary (devcontainer source). Omit @branch to auto-detect.`,
 		Args: cobra.MaximumNArgs(1),
@@ -83,6 +88,17 @@ The first --repo is the primary (devcontainer source). Omit @branch to auto-dete
 				"name":      name,
 				"cpu":       cpu,
 				"memory_mb": memMB,
+			}
+
+			if investigate {
+				if org == "" {
+					return fmt.Errorf("--org is required with --investigate")
+				}
+				reqBody["mode"] = "investigation"
+				reqBody["org"] = org
+				if name == "workspace" {
+					reqBody["name"] = "investigate-" + org
+				}
 			}
 
 			if len(repoFlags) > 0 {
@@ -141,6 +157,8 @@ The first --repo is the primary (devcontainer source). Omit @branch to auto-dete
 	}
 
 	cmd.Flags().StringArrayVar(&repoFlags, "repo", nil, "Repository URL (use url@branch for branch, repeatable)")
+	cmd.Flags().BoolVar(&investigate, "investigate", false, "Create investigation workspace (shallow-clone entire org)")
+	cmd.Flags().StringVar(&org, "org", "", "GitHub organization (required with --investigate)")
 	cmd.Flags().IntVar(&cpu, "cpu", 2, "CPU cores")
 	cmd.Flags().IntVar(&memMB, "memory", 4096, "Memory in MB")
 	return cmd
@@ -437,6 +455,46 @@ Example:
 
 	cmd.Flags().Bool("all", false, "Include archived repos")
 	return cmd
+}
+
+func wsActivateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "activate <workspace-id> <repo-url> [repo-url...]",
+		Short: "Activate repos in an investigation workspace",
+		Long: `Activate one or more repositories in an investigation workspace.
+Each repo gets a dedicated service container with its devcontainer.
+
+Examples:
+  cordon ws activate abc12345 github.com/org/backend
+  cordon ws activate abc12345 backend frontend    # multiple repos by short name`,
+		Args: cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fullID, err := resolveWorkspaceID(args[0])
+			if err != nil {
+				return err
+			}
+			repoURLs := args[1:]
+
+			reqBody, _ := json.Marshal(map[string]any{"repo_urls": repoURLs})
+			resp, err := http.Post(serverURL+"/api/workspaces/"+fullID+"/activate", "application/json", bytes.NewReader(reqBody))
+			if err != nil {
+				return fmt.Errorf("request failed: %w", err)
+			}
+			defer resp.Body.Close()
+
+			data, _ := io.ReadAll(resp.Body)
+			if resp.StatusCode >= 400 {
+				fmt.Fprintf(os.Stderr, "Error: %s\n", string(data))
+				os.Exit(1)
+			}
+
+			fmt.Printf("Activating %d repo(s)...\n", len(repoURLs))
+			if err := streamProgress(fullID); err != nil {
+				return err
+			}
+			return nil
+		},
+	}
 }
 
 // resolveWorkspaceID resolves a short workspace ID prefix to a full UUID

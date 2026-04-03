@@ -104,6 +104,15 @@ export function workspaceAction(
   return fetchJSON("POST", `/api/workspaces/${id}/${action}`);
 }
 
+export function activateRepos(
+  workspaceId: string,
+  repoURLs: string[],
+): Promise<{ status: string; repo_urls: string[] }> {
+  return fetchJSON("POST", `/api/workspaces/${workspaceId}/activate`, {
+    repo_urls: repoURLs,
+  });
+}
+
 export function getHealth(): Promise<{ status: string }> {
   return fetchJSON("GET", "/health");
 }

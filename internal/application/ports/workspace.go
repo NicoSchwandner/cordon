@@ -17,4 +17,5 @@ type WorkspaceService interface {
 	Destroy(ctx context.Context, tenantID, workspaceID uuid.UUID) error
 	Exec(ctx context.Context, tenantID, workspaceID uuid.UUID, cmd []string) (int, error)
 	ExecInRepo(ctx context.Context, workspaceID uuid.UUID, repoName string, cmd []string) (int, string, error)
+	ActivateRepo(ctx context.Context, tenantID, workspaceID uuid.UUID, repoURL string) error
 }

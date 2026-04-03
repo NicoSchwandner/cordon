@@ -24,6 +24,7 @@ type Workspace struct {
 	SuspendedAt *time.Time
 	ExpiresAt   time.Time
 	Config      WorkspaceConfig
+	SpawnedFrom *uuid.UUID // non-nil if activated from an investigation workspace
 }
 
 // RepoConfig describes a single repository in a workspace.
@@ -36,16 +37,50 @@ type RepoConfig struct {
 	ServiceContainer bool   `json:"service_container,omitempty"` // gets its own devcontainer container
 }
 
+// WorkspaceMode distinguishes development vs investigation workspaces.
+type WorkspaceMode string
+
+const (
+	WorkspaceModeDev           WorkspaceMode = "dev"
+	WorkspaceModeInvestigation WorkspaceMode = "investigation"
+)
+
+// InvestigationState tracks the catalog and activation state for investigation workspaces.
+// Shallow repos are stored as URL strings here, NOT in Config.Repos, so the provider
+// never attempts devcontainer builds for them.
+type InvestigationState struct {
+	CatalogOrg     string   `json:"catalog_org"`
+	ShallowRepos   []string `json:"shallow_repos"`
+	ActivatedRepos []string `json:"activated_repos"`
+}
+
+// IsActivated returns true if the given repo URL has been activated.
+func (s *InvestigationState) IsActivated(repoURL string) bool {
+	for _, u := range s.ActivatedRepos {
+		if u == repoURL {
+			return true
+		}
+	}
+	return false
+}
+
 type WorkspaceConfig struct {
 	ID               uuid.UUID     // pre-generated workspace ID (zero = auto-generate)
 	Name             string
+	Mode             WorkspaceMode
 	Repos            []RepoConfig
+	Investigation    *InvestigationState // non-nil for investigation workspaces
 	DevcontainerPath string
 	CPU              int
 	MemoryMB         int
 	IdleTimeout      time.Duration
 	MaxLifetime      time.Duration
 	AllowSSH         bool
+}
+
+// IsInvestigation returns true if this is an investigation workspace.
+func (c WorkspaceConfig) IsInvestigation() bool {
+	return c.Mode == WorkspaceModeInvestigation
 }
 
 // PrimaryRepo returns the primary repository config.
