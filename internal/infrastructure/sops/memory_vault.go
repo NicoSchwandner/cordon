@@ -104,6 +104,21 @@ func (v *MemoryVault) Resolve(_ context.Context, tenantID uuid.UUID, placeholder
 	return "", fmt.Errorf("secret not found for placeholder %q", placeholder)
 }
 
+func (v *MemoryVault) RevealValue(_ context.Context, tenantID uuid.UUID, name string) (string, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	tid := tenantID.String()
+	placeholder, ok := v.byName[tid][name]
+	if !ok {
+		return "", fmt.Errorf("secret %q not found", name)
+	}
+	val, ok := v.secrets[tid][placeholder]
+	if !ok {
+		return "", fmt.Errorf("secret %q not found", name)
+	}
+	return val, nil
+}
+
 func (v *MemoryVault) ListRefs(_ context.Context, tenantID uuid.UUID) ([]domain.SecretRef, error) {
 	v.mu.RLock()
 	defer v.mu.RUnlock()

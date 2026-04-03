@@ -121,6 +121,7 @@ func main() {
 	mux.Handle("GET /api/secrets", authMW(http.HandlerFunc(secretHandler.List)))
 	mux.Handle("POST /api/secrets", authMW(http.HandlerFunc(secretHandler.Set)))
 	mux.Handle("PUT /api/secrets", authMW(http.HandlerFunc(secretHandler.Set)))
+	mux.Handle("GET /api/secrets/", authMW(http.HandlerFunc(secretHandler.Reveal)))
 	mux.Handle("DELETE /api/secrets/", authMW(http.HandlerFunc(secretHandler.Delete)))
 
 	// Workspaces

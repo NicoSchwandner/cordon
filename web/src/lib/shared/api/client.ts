@@ -114,6 +114,10 @@ export function updateSecret(req: SetSecretRequest): Promise<SecretRef> {
   return fetchJSON("PUT", "/api/secrets", req);
 }
 
+export function revealSecret(name: string): Promise<{ value: string }> {
+  return fetchJSON("GET", `/api/secrets/${encodeURIComponent(name)}/value`);
+}
+
 export function deleteSecret(name: string): Promise<void> {
   return fetchJSON("DELETE", `/api/secrets/${encodeURIComponent(name)}`);
 }

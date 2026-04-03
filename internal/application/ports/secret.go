@@ -13,4 +13,5 @@ type SecretVault interface {
 	ListRefs(ctx context.Context, tenantID uuid.UUID) ([]domain.SecretRef, error)
 	SetSecret(ctx context.Context, tenantID uuid.UUID, name, placeholder, realValue string) error
 	DeleteSecret(ctx context.Context, tenantID uuid.UUID, name string) error
+	RevealValue(ctx context.Context, tenantID uuid.UUID, name string) (string, error)
 }

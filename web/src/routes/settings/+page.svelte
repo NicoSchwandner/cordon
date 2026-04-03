@@ -1,6 +1,6 @@
 <script lang="ts">
 	import type { SecretRef } from '$lib/shared/api/types';
-	import { listSecrets, setSecret, updateSecret, deleteSecret } from '$lib/shared/api/client';
+	import { listSecrets, setSecret, updateSecret, deleteSecret, revealSecret } from '$lib/shared/api/client';
 
 	let activeTab: 'egress' | 'overrides' | 'secrets' = $state('egress');
 
@@ -20,7 +20,9 @@
 	// Secrets state
 	let secrets: SecretRef[] = $state([]);
 	let loading = $state(false);
-	let revealedSecrets: Set<string> = $state(new Set());
+	let revealedValues: Record<string, string> = $state({});
+	let revealLoading: Set<string> = $state(new Set());
+	let copiedName: string | null = $state(null);
 
 	// Form state
 	let showForm = $state(false);
@@ -45,16 +47,36 @@
 		loading = false;
 	}
 
-	function toggleReveal(name: string) {
-		const next = new Set(revealedSecrets);
-		if (next.has(name)) next.delete(name);
-		else next.add(name);
-		revealedSecrets = next;
+	async function copyPlaceholder(placeholder: string, name: string) {
+		await navigator.clipboard.writeText(placeholder);
+		copiedName = name;
+		setTimeout(() => { if (copiedName === name) copiedName = null; }, 2000);
 	}
 
-	function maskPlaceholder(placeholder: string): string {
-		if (placeholder.length <= 12) return '••••••••••••';
-		return placeholder.slice(0, 8) + '••••' + placeholder.slice(-4);
+	async function toggleRevealValue(name: string) {
+		if (name in revealedValues) {
+			const next = { ...revealedValues };
+			delete next[name];
+			revealedValues = next;
+			return;
+		}
+		const nextLoading = new Set(revealLoading);
+		nextLoading.add(name);
+		revealLoading = nextLoading;
+		try {
+			const { value } = await revealSecret(name);
+			revealedValues = { ...revealedValues, [name]: value };
+		} catch {
+			/* ignore */
+		}
+		const doneLoading = new Set(revealLoading);
+		doneLoading.delete(name);
+		revealLoading = doneLoading;
+	}
+
+	function maskValue(value: string): string {
+		if (value.length <= 8) return '••••••••';
+		return value.slice(0, 4) + '•'.repeat(Math.min(value.length - 8, 16)) + value.slice(-4);
 	}
 
 	function startAdd() {
@@ -293,37 +315,62 @@
 			{:else}
 				<div class="space-y-2">
 					{#each secrets as secret (secret.name)}
-						<div class="flex items-center justify-between rounded-lg bg-surface-inset px-4 py-3">
-							<div class="min-w-0 flex-1">
+						<div class="rounded-lg bg-surface-inset px-4 py-3">
+							<div class="flex items-center justify-between">
 								<span class="font-mono text-sm font-medium text-foreground">{secret.name}</span>
-								<button
-									onclick={() => toggleReveal(secret.name)}
-									class="ml-2 text-xs text-foreground-faint transition-colors hover:text-foreground-muted"
-									title={revealedSecrets.has(secret.name) ? 'Hide placeholder' : 'Reveal placeholder'}
-								>
-									{#if revealedSecrets.has(secret.name)}
-										<span class="font-mono">{secret.placeholder}</span>
-									{:else}
-										<span class="font-mono">{maskPlaceholder(secret.placeholder)}</span>
-									{/if}
-								</button>
+								<div class="flex shrink-0 items-center gap-2">
+									<span class="rounded-full bg-success-badge-bg px-2.5 py-1 text-xs font-medium text-success-text">
+										configured
+									</span>
+									<button
+										onclick={() => startEdit(secret)}
+										class="rounded-md px-2 py-1 text-xs text-foreground-muted transition-colors hover:bg-hover-subtle hover:text-foreground"
+									>
+										Edit
+									</button>
+									<button
+										onclick={() => handleDelete(secret.name)}
+										class="rounded-md px-2 py-1 text-xs text-danger-text transition-colors hover:bg-danger-bg"
+									>
+										Delete
+									</button>
+								</div>
 							</div>
-							<div class="flex shrink-0 items-center gap-2">
-								<span class="rounded-full bg-success-badge-bg px-2.5 py-1 text-xs font-medium text-success-text">
-									configured
-								</span>
-								<button
-									onclick={() => startEdit(secret)}
-									class="rounded-md px-2 py-1 text-xs text-foreground-muted transition-colors hover:bg-hover-subtle hover:text-foreground"
-								>
-									Edit
-								</button>
-								<button
-									onclick={() => handleDelete(secret.name)}
-									class="rounded-md px-2 py-1 text-xs text-danger-text transition-colors hover:bg-danger-bg"
-								>
-									Delete
-								</button>
+							<div class="mt-2 flex items-center gap-3">
+								<div class="flex min-w-0 items-center gap-1.5">
+									<span class="text-xs text-foreground-faint">placeholder:</span>
+									<code class="truncate font-mono text-xs text-foreground-secondary">{secret.placeholder}</code>
+									<button
+										onclick={() => copyPlaceholder(secret.placeholder, secret.name)}
+										class="shrink-0 rounded px-1.5 py-0.5 text-xs text-foreground-faint transition-colors hover:bg-hover-subtle hover:text-foreground-muted"
+										title="Copy placeholder"
+									>
+										{copiedName === secret.name ? 'copied!' : 'copy'}
+									</button>
+								</div>
+								<span class="text-foreground-faint">|</span>
+								<div class="flex items-center gap-1.5">
+									<span class="text-xs text-foreground-faint">value:</span>
+									{#if revealLoading.has(secret.name)}
+										<span class="text-xs text-foreground-muted">loading...</span>
+									{:else if secret.name in revealedValues}
+										<code class="font-mono text-xs text-foreground-secondary">{maskValue(revealedValues[secret.name])}</code>
+										<button
+											onclick={() => toggleRevealValue(secret.name)}
+											class="shrink-0 rounded px-1.5 py-0.5 text-xs text-foreground-faint transition-colors hover:bg-hover-subtle hover:text-foreground-muted"
+										>
+											hide
+										</button>
+									{:else}
+										<span class="font-mono text-xs text-foreground-faint">••••••••</span>
+										<button
+											onclick={() => toggleRevealValue(secret.name)}
+											class="shrink-0 rounded px-1.5 py-0.5 text-xs text-foreground-faint transition-colors hover:bg-hover-subtle hover:text-foreground-muted"
+										>
+											reveal
+										</button>
+									{/if}
+								</div>
 							</div>
 						</div>
 					{/each}

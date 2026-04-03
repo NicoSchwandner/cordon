@@ -82,6 +82,29 @@ func (h *SecretHandler) Set(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(SecretRefResponse{Name: req.Name, Placeholder: req.Placeholder})
 }
 
+func (h *SecretHandler) Reveal(w http.ResponseWriter, r *http.Request) {
+	// /api/secrets/{name}/value
+	path := strings.TrimPrefix(r.URL.Path, "/api/secrets/")
+	name := strings.TrimSuffix(path, "/value")
+	if name == "" {
+		http.Error(w, "missing secret name", http.StatusBadRequest)
+		return
+	}
+
+	tenantID := middleware.TenantIDFromContext(r.Context())
+	value, err := h.vault.RevealValue(r.Context(), tenantID, name)
+	if err != nil {
+		middleware.WriteProblem(w, domain.ProblemDetails{
+			Type: "https://cordon.dev/problems/secret-not-found", Title: "Not Found",
+			Status: 404, Detail: err.Error(), Code: "secret_not_found",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"value": value})
+}
+
 func (h *SecretHandler) Delete(w http.ResponseWriter, r *http.Request) {
 	// /api/secrets/{name}
 	name := strings.TrimPrefix(r.URL.Path, "/api/secrets/")
