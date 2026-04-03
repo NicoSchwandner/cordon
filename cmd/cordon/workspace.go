@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -23,8 +25,17 @@ func workspaceCmd() *cobra.Command {
 	return cmd
 }
 
+// progressEvent mirrors the server's progress.Event struct.
+type progressEvent struct {
+	Step          string `json:"step"`
+	Message       string `json:"message"`
+	Done          bool   `json:"done"`
+	Error         string `json:"error,omitempty"`
+	EstimatedSecs int    `json:"estimated_secs,omitempty"`
+}
+
 func wsCreateCmd() *cobra.Command {
-	var repo string
+	var repo, branch, baseBranch string
 	var cpu, memMB int
 
 	cmd := &cobra.Command{
@@ -36,13 +47,23 @@ func wsCreateCmd() *cobra.Command {
 			if len(args) > 0 {
 				name = args[0]
 			}
-			body, _ := json.Marshal(map[string]any{
+
+			reqBody := map[string]any{
 				"name":      name,
-				"repo":      repo,
 				"cpu":       cpu,
 				"memory_mb": memMB,
-			})
+			}
+			if repo != "" {
+				reqBody["repo"] = repo
+			}
+			if branch != "" {
+				reqBody["branch"] = branch
+			}
+			if baseBranch != "" {
+				reqBody["base_branch"] = baseBranch
+			}
 
+			body, _ := json.Marshal(reqBody)
 			resp, err := http.Post(serverURL+"/api/workspaces", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("request failed: %w", err)
@@ -56,20 +77,99 @@ func wsCreateCmd() *cobra.Command {
 			}
 
 			var ws struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
+				ID     string `json:"id"`
+				Name   string `json:"name"`
+				Status string `json:"status"`
 			}
 			json.Unmarshal(data, &ws)
-			fmt.Printf("Workspace created: %s (%s)\n", ws.Name, ws.ID)
-			fmt.Printf("Connect: zt connect %s\n", ws.ID)
+
+			// Async creation (repo-based) — stream progress
+			if ws.Status == "creating" {
+				fmt.Printf("Creating workspace %s (%s)...\n", ws.Name, ws.ID[:8])
+				if err := streamProgress(ws.ID); err != nil {
+					return err
+				}
+			} else {
+				fmt.Printf("Workspace created: %s (%s)\n", ws.Name, ws.ID[:8])
+			}
+
+			fmt.Printf("Connect: cordon connect %s\n", ws.ID[:8])
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&repo, "repo", "", "Git repository to clone")
+	cmd.Flags().StringVar(&branch, "branch", "", "Branch to checkout in the workspace")
+	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "Base branch for devcontainer image (defaults to --branch)")
 	cmd.Flags().IntVar(&cpu, "cpu", 2, "CPU cores")
 	cmd.Flags().IntVar(&memMB, "memory", 4096, "Memory in MB")
 	return cmd
+}
+
+// streamProgress connects to the SSE endpoint and prints creation progress.
+func streamProgress(workspaceID string) error {
+	resp, err := http.Get(serverURL + "/api/workspaces/" + workspaceID + "/logs")
+	if err != nil {
+		return fmt.Errorf("connecting to progress stream: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("progress stream returned %d", resp.StatusCode)
+	}
+
+	var estimatedSecs int
+	start := time.Now()
+	completed := []string{}
+
+	scanner := bufio.NewScanner(resp.Body)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+
+		var evt progressEvent
+		if err := json.Unmarshal([]byte(line[6:]), &evt); err != nil {
+			continue
+		}
+
+		if evt.EstimatedSecs > 0 && estimatedSecs == 0 {
+			estimatedSecs = evt.EstimatedSecs
+		}
+
+		if evt.Done {
+			// Print all completed steps
+			for _, msg := range completed {
+				fmt.Printf("  \033[32m✓\033[0m %s\n", msg)
+			}
+			if evt.Error != "" {
+				fmt.Printf("  \033[31m✗ %s\033[0m\n", evt.Error)
+				return fmt.Errorf("creation failed: %s", evt.Error)
+			}
+			fmt.Printf("  \033[32m✓\033[0m Ready! (%.0fs)\n", time.Since(start).Seconds())
+			return nil
+		}
+
+		// Clear current line and print previous step as completed
+		fmt.Printf("\033[2K\r")
+		if len(completed) > 0 {
+			fmt.Printf("  \033[32m✓\033[0m %s\n", completed[len(completed)-1])
+		}
+		completed = append(completed, evt.Message)
+
+		// Print current step with time estimate
+		remaining := ""
+		if estimatedSecs > 0 {
+			left := float64(estimatedSecs) - time.Since(start).Seconds()
+			if left > 0 {
+				remaining = fmt.Sprintf("  ~%.0fs remaining", left)
+			}
+		}
+		fmt.Printf("  ● %s%s", evt.Message, remaining)
+	}
+
+	return scanner.Err()
 }
 
 func wsListCmd() *cobra.Command {
