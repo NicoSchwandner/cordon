@@ -17,6 +17,7 @@ import (
 	apiws "github.com/nicobistolfi/cordon/internal/api/ws"
 	"github.com/nicobistolfi/cordon/internal/application/audit"
 	"github.com/nicobistolfi/cordon/internal/application/proxy"
+	"github.com/nicobistolfi/cordon/internal/infrastructure/devcontainer"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/docker"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/postgres"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/sops"
@@ -51,9 +52,21 @@ func main() {
 	vault.AddSecret(tenantID, "DATABASE_URL", "cordon-placeholder-database-url", envOr("REAL_DATABASE_URL", "postgresql://real:secret@db:5432/prod"))
 	vault.AddSecret(tenantID, "API_KEY", "cordon-placeholder-api-key", envOr("REAL_API_KEY", "sk-real-key-12345"))
 
+	// Devcontainer builder (optional — needs `devcontainer` CLI on PATH)
+	githubToken := os.Getenv("GITHUB_TOKEN")
+	var dcBuilder *devcontainer.Builder
+	dcBuilder, err = devcontainer.NewBuilder()
+	if err != nil {
+		log.Printf("WARNING: devcontainer CLI not available, repo-based workspaces disabled: %v", err)
+	}
+	if githubToken != "" {
+		log.Printf("GITHUB_TOKEN configured — private repo cloning enabled")
+		vault.AddSecret(tenantID, "GITHUB_TOKEN", "cordon-placeholder-github-token", githubToken)
+	}
+
 	// Workspace orchestrator (Docker)
 	var workspaceProvider *docker.Provider
-	workspaceProvider, err = docker.NewProvider()
+	workspaceProvider, err = docker.NewProvider(dcBuilder, githubToken)
 	if err != nil {
 		log.Printf("WARNING: Docker not available, workspace features disabled: %v", err)
 	}

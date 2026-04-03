@@ -10,22 +10,37 @@
 
 	let showForm = $state(false);
 	let newName = $state('');
+	let newRepo = $state('');
+	let newBranch = $state('');
 	let creating = $state(false);
 	let extraWorkspaces: WorkspaceResponse[] = $state([]);
 	const workspaces = $derived([...extraWorkspaces, ...data.workspaces]);
+	const hasRepo = $derived(newRepo.trim().length > 0);
 
 	async function handleCreate() {
-		if (!newName.trim()) return;
+		const name = newName.trim() || repoShortName(newRepo) || 'workspace';
 		creating = true;
 		try {
-			const ws = await createWorkspace({ name: newName.trim() });
+			const req: import('$lib/shared/api/types').CreateWorkspaceRequest = { name };
+			if (newRepo.trim()) {
+				req.repo = newRepo.trim();
+				req.branch = newBranch.trim() || 'development';
+			}
+			const ws = await createWorkspace(req);
 			extraWorkspaces = [ws, ...extraWorkspaces];
 			newName = '';
+			newRepo = '';
+			newBranch = '';
 			showForm = false;
 		} catch (e) {
 			alert(e instanceof Error ? e.message : 'Failed to create workspace');
 		}
 		creating = false;
+	}
+
+	function repoShortName(repo: string): string {
+		const parts = repo.replace(/\.git$/, '').split('/');
+		return parts[parts.length - 1] || '';
 	}
 </script>
 
@@ -64,20 +79,56 @@
 					e.preventDefault();
 					handleCreate();
 				}}
-				class="mb-4 flex gap-2"
+				class="mb-4 space-y-3 rounded-xl border border-border bg-surface p-4"
 			>
-				<input
-					bind:value={newName}
-					placeholder="Workspace name"
-					class="flex-1 rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
-				/>
-				<button
-					type="submit"
-					disabled={creating}
-					class="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
-				>
-					{creating ? 'Creating...' : 'Create'}
-				</button>
+				<div>
+					<label for="ws-repo" class="mb-1 block text-xs font-medium text-foreground-muted">Repository URL <span class="font-normal text-foreground-faint">(optional — leave empty for bare container)</span></label>
+					<input
+						id="ws-repo"
+						bind:value={newRepo}
+						placeholder="e.g. github.com/WintDev/Core"
+						class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+					/>
+				</div>
+				{#if hasRepo}
+					<div>
+						<label for="ws-branch" class="mb-1 block text-xs font-medium text-foreground-muted">Branch</label>
+						<input
+							id="ws-branch"
+							bind:value={newBranch}
+							placeholder="development"
+							class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+						/>
+					</div>
+				{/if}
+				<div>
+					<label for="ws-name" class="mb-1 block text-xs font-medium text-foreground-muted">Name <span class="font-normal text-foreground-faint">(auto-fills from repo if empty)</span></label>
+					<input
+						id="ws-name"
+						bind:value={newName}
+						placeholder={hasRepo ? repoShortName(newRepo) || 'workspace' : 'workspace'}
+						class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+					/>
+				</div>
+				{#if hasRepo}
+					<p class="text-xs text-foreground-faint">Building from devcontainer may take a few minutes on first run.</p>
+				{/if}
+				<div class="flex gap-2">
+					<button
+						type="submit"
+						disabled={creating}
+						class="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-on-primary transition-colors hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
+					>
+						{creating ? 'Creating...' : 'Create Workspace'}
+					</button>
+					<button
+						type="button"
+						onclick={() => (showForm = false)}
+						class="rounded-lg border border-border-input px-4 py-2 text-sm text-foreground-secondary transition-colors hover:bg-hover-subtle"
+					>
+						Cancel
+					</button>
+				</div>
 			</form>
 		{/if}
 
@@ -98,9 +149,14 @@
 							<span class="font-medium text-foreground">{ws.name}</span>
 							<StatusDot status={ws.status} />
 						</div>
-						<div class="text-xs text-foreground-faint">
-							Created {new Date(ws.created_at).toLocaleDateString()}
-						</div>
+						{#if ws.repo}
+							<div class="mb-1 truncate text-xs font-mono text-foreground-secondary">{ws.repo}</div>
+							<div class="text-xs text-foreground-faint">{ws.branch || 'main'}</div>
+						{:else}
+							<div class="text-xs text-foreground-faint">
+								Created {new Date(ws.created_at).toLocaleDateString()}
+							</div>
+						{/if}
 					</a>
 				{/each}
 			</div>

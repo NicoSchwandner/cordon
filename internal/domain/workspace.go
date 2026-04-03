@@ -34,5 +34,6 @@ type WorkspaceConfig struct {
 	IdleTimeout      time.Duration
 	MaxLifetime      time.Duration
 	Repo             string
+	Branch           string
 	AllowSSH         bool
 }

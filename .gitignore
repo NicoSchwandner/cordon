@@ -1,5 +1,6 @@
 # Go binaries
 /server
+/cordon
 /cordon-server
 *.exe
 tmp/

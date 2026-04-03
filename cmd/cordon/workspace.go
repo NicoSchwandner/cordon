@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -108,7 +109,11 @@ func wsDestroyCmd() *cobra.Command {
 		Short: "Destroy a workspace",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			req, _ := http.NewRequest("DELETE", serverURL+"/api/workspaces/"+args[0], nil)
+			fullID, err := resolveWorkspaceID(args[0])
+			if err != nil {
+				return err
+			}
+			req, _ := http.NewRequest("DELETE", serverURL+"/api/workspaces/"+fullID, nil)
 			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				return fmt.Errorf("request failed: %w", err)
@@ -123,5 +128,46 @@ func wsDestroyCmd() *cobra.Command {
 			}
 			return nil
 		},
+	}
+}
+
+// resolveWorkspaceID resolves a short workspace ID prefix to a full UUID
+// by querying the workspace list API. If the input is already a full UUID,
+// it is returned as-is.
+func resolveWorkspaceID(idOrPrefix string) (string, error) {
+	// If it looks like a full UUID, return as-is
+	if len(idOrPrefix) == 36 && strings.Count(idOrPrefix, "-") == 4 {
+		return idOrPrefix, nil
+	}
+
+	resp, err := http.Get(serverURL + "/api/workspaces")
+	if err != nil {
+		return "", fmt.Errorf("listing workspaces: %w", err)
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+	var workspaces []struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(data, &workspaces); err != nil {
+		return "", fmt.Errorf("parsing workspace list: %w", err)
+	}
+
+	prefix := strings.ToLower(idOrPrefix)
+	var matches []string
+	for _, ws := range workspaces {
+		if strings.HasPrefix(strings.ToLower(ws.ID), prefix) {
+			matches = append(matches, ws.ID)
+		}
+	}
+
+	switch len(matches) {
+	case 0:
+		return "", fmt.Errorf("no workspace found matching %q", idOrPrefix)
+	case 1:
+		return matches[0], nil
+	default:
+		return "", fmt.Errorf("ambiguous workspace ID %q matches %d workspaces", idOrPrefix, len(matches))
 	}
 }

@@ -27,7 +27,11 @@ func connectCmd() *cobra.Command {
 }
 
 func runConnect(workspaceID string) error {
-	url := strings.Replace(serverURL, "http", "ws", 1) + "/ws/terminal/" + workspaceID
+	fullID, err := resolveWorkspaceID(workspaceID)
+	if err != nil {
+		return err
+	}
+	url := strings.Replace(serverURL, "http", "ws", 1) + "/ws/terminal/" + fullID
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

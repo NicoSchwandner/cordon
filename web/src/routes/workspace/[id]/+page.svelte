@@ -53,6 +53,11 @@
 			{#if data.workspace}
 				<h1 class="text-xl font-semibold tracking-tight text-foreground">{data.workspace.name}</h1>
 				<StatusDot status={data.workspace.status} />
+				{#if data.workspace.repo}
+					<span class="rounded-full bg-surface-raised px-2.5 py-1 text-xs font-mono text-foreground-secondary">
+						{data.workspace.branch || 'main'}
+					</span>
+				{/if}
 			{:else}
 				<h1 class="text-xl font-semibold tracking-tight text-foreground">Workspace {data.workspaceId}</h1>
 			{/if}

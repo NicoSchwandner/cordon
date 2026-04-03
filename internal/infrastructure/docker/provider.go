@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"strings"
 	"time"
 
@@ -16,21 +17,27 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/google/uuid"
 	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/nicobistolfi/cordon/internal/infrastructure/devcontainer"
 )
 
 // Provider manages Docker-based workspaces.
 // Container labels are the source of truth — no in-memory state survives restarts.
 type Provider struct {
-	client *client.Client
+	client  *client.Client
+	builder *devcontainer.Builder // nil = bare containers only
+	token   string                // GitHub token for authenticated git operations
 }
 
-func NewProvider() (*Provider, error) {
+// NewProvider creates a Docker workspace provider.
+// builder may be nil (devcontainer features disabled).
+// token may be empty (only public repos supported).
+func NewProvider(builder *devcontainer.Builder, token string) (*Provider, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("creating docker client: %w", err)
 	}
 
-	// Log how many cordon containers already exist (from previous runs)
+	// Log existing cordon containers from previous runs
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	existing, _ := cli.ContainerList(ctx, container.ListOptions{
@@ -40,17 +47,121 @@ func NewProvider() (*Provider, error) {
 		log.Printf("[workspace] found %d existing cordon container(s) from previous run", len(existing))
 	}
 
-	return &Provider{client: cli}, nil
+	return &Provider{client: cli, builder: builder, token: token}, nil
 }
 
 func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
+	if config.Repo != "" && p.builder != nil {
+		return p.createFromRepo(ctx, tenantID, config)
+	}
+	return p.createBare(ctx, tenantID, config)
+}
+
+// createBare creates a container from the default base image (no repo).
+func (p *Provider) createBare(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
 	wsID := uuid.New()
-	safeName := sanitizeContainerName(config.Name)
-	containerName := fmt.Sprintf("cordon-%s-%s", safeName, wsID.String()[:8])
+	containerName := p.containerName(config.Name, wsID)
+	now := time.Now().UTC()
 
-	log.Printf("[workspace] creating %s (tenant=%s)", containerName, tenantID.String()[:8])
+	log.Printf("[workspace] creating bare container %s (tenant=%s)", containerName, tenantID.String()[:8])
 
-	// Create a dedicated network for the workspace
+	networkID, err := p.createNetwork(ctx, containerName, tenantID, wsID)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+
+	image := "mcr.microsoft.com/devcontainers/base:ubuntu"
+	p.pullImage(ctx, image)
+
+	labels := p.baseLabels(tenantID, wsID, config.Name, now, config.MaxLifetime)
+	env := []string{
+		"ZT_WORKSPACE_ID=" + wsID.String(),
+		"ZT_TENANT_ID=" + tenantID.String(),
+	}
+
+	ws, err := p.startContainer(ctx, containerName, image, labels, env, config, networkID, tenantID, wsID, now)
+	if err != nil {
+		p.client.NetworkRemove(ctx, networkID)
+		return domain.Workspace{}, err
+	}
+	return ws, nil
+}
+
+// createFromRepo builds a devcontainer image, creates a container, clones the repo inside, and runs setup.
+func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
+	wsID := uuid.New()
+	containerName := p.containerName(config.Name, wsID)
+	now := time.Now().UTC()
+
+	log.Printf("[workspace] creating devcontainer %s from %s (branch=%s)", containerName, config.Repo, config.Branch)
+
+	// Build the devcontainer image
+	branch := config.Branch
+	if branch == "" {
+		branch = "main"
+	}
+	result, err := p.builder.Build(ctx, config.Repo, branch, p.token, config.DevcontainerPath)
+	if err != nil {
+		return domain.Workspace{}, fmt.Errorf("building devcontainer image: %w", err)
+	}
+
+	// Create network
+	networkID, err := p.createNetwork(ctx, containerName, tenantID, wsID)
+	if err != nil {
+		return domain.Workspace{}, err
+	}
+
+	// Labels include repo metadata
+	labels := p.baseLabels(tenantID, wsID, config.Name, now, config.MaxLifetime)
+	labels["cordon.repo"] = config.Repo
+	labels["cordon.branch"] = branch
+	labels["cordon.workspace-folder"] = result.WorkspaceFolder
+
+	// Environment: merge devcontainer env + cordon env
+	env := []string{
+		"ZT_WORKSPACE_ID=" + wsID.String(),
+		"ZT_TENANT_ID=" + tenantID.String(),
+	}
+	for k, v := range result.Env {
+		env = append(env, k+"="+v)
+	}
+
+	// Create and start the container
+	ws, err := p.startContainer(ctx, containerName, result.ImageName, labels, env, config, networkID, tenantID, wsID, now)
+	if err != nil {
+		p.client.NetworkRemove(ctx, networkID)
+		return domain.Workspace{}, err
+	}
+
+	// Clone repo inside the running container
+	cloneURL := p.cloneURL(config.Repo)
+	cloneCmd := fmt.Sprintf("git clone --branch %s %s %s", branch, cloneURL, result.WorkspaceFolder)
+	log.Printf("[workspace] cloning repo inside container")
+	if _, err := p.execInContainer(ctx, ws.ID.String()[:12], cloneCmd); err != nil {
+		log.Printf("[workspace] warning: clone failed: %v", err)
+		// Don't fail — container is still usable
+	}
+
+	// Run postCreateCommand
+	for _, cmd := range result.PostCreateCommand {
+		log.Printf("[workspace] running postCreateCommand: %s", cmd)
+		shellCmd := fmt.Sprintf("cd %s && %s", result.WorkspaceFolder, cmd)
+		if _, err := p.execInContainer(ctx, ws.ID.String()[:12], shellCmd); err != nil {
+			log.Printf("[workspace] warning: postCreateCommand failed: %v", err)
+		}
+	}
+
+	log.Printf("[workspace] %s is ready", containerName)
+	return ws, nil
+}
+
+// --- Shared helpers ---
+
+func (p *Provider) containerName(name string, wsID uuid.UUID) string {
+	return fmt.Sprintf("cordon-%s-%s", sanitizeContainerName(name), wsID.String()[:8])
+}
+
+func (p *Provider) createNetwork(ctx context.Context, containerName string, tenantID, wsID uuid.UUID) (string, error) {
 	networkResp, err := p.client.NetworkCreate(ctx, containerName+"-net", network.CreateOptions{
 		Driver: "bridge",
 		Labels: map[string]string{
@@ -59,13 +170,22 @@ func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain
 		},
 	})
 	if err != nil {
-		return domain.Workspace{}, fmt.Errorf("creating network: %w", err)
+		return "", fmt.Errorf("creating network: %w", err)
 	}
+	return networkResp.ID, nil
+}
 
-	// Use a base dev image — in production this would be built from devcontainer.json
-	image := "mcr.microsoft.com/devcontainers/base:ubuntu"
+func (p *Provider) baseLabels(tenantID, wsID uuid.UUID, name string, now time.Time, maxLifetime time.Duration) map[string]string {
+	return map[string]string{
+		"cordon.tenant":    tenantID.String(),
+		"cordon.workspace": wsID.String(),
+		"cordon.name":      name,
+		"cordon.created":   now.Format(time.RFC3339),
+		"cordon.expires":   now.Add(maxLifetime).Format(time.RFC3339),
+	}
+}
 
-	// Pull image if not already available
+func (p *Provider) pullImage(ctx context.Context, image string) {
 	log.Printf("[workspace] ensuring image %s is available...", image)
 	reader, err := p.client.ImagePull(ctx, image, dockerimage.PullOptions{})
 	if err == nil {
@@ -73,30 +193,19 @@ func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain
 		reader.Close()
 		log.Printf("[workspace] image ready")
 	} else {
-		log.Printf("[workspace] image pull failed (may already exist locally): %v", err)
+		log.Printf("[workspace] image pull skipped (may already exist): %v", err)
 	}
+}
 
-	// Create workspace container
+func (p *Provider) startContainer(ctx context.Context, containerName, image string, labels map[string]string, env []string, config domain.WorkspaceConfig, networkID string, tenantID, wsID uuid.UUID, now time.Time) (domain.Workspace, error) {
 	cpuQuota := int64(config.CPU) * 100000
 	memLimit := int64(config.MemoryMB) * 1024 * 1024
-	now := time.Now().UTC()
 
 	containerConfig := &container.Config{
-		Image: image,
-		Labels: map[string]string{
-			"cordon.tenant":    tenantID.String(),
-			"cordon.workspace": wsID.String(),
-			"cordon.name":      config.Name,
-			"cordon.created":   now.Format(time.RFC3339),
-			"cordon.expires":   now.Add(config.MaxLifetime).Format(time.RFC3339),
-		},
-		Env: []string{
-			"ZT_WORKSPACE_ID=" + wsID.String(),
-			"ZT_TENANT_ID=" + tenantID.String(),
-			"DATABASE_URL=cordon-placeholder-database-url",
-			"API_KEY=cordon-placeholder-api-key",
-		},
-		Cmd: []string{"sleep", "infinity"},
+		Image:  image,
+		Labels: labels,
+		Env:    env,
+		Cmd:    []string{"sleep", "infinity"},
 	}
 
 	hostConfig := &container.HostConfig{
@@ -109,14 +218,12 @@ func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain
 
 	resp, err := p.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, containerName)
 	if err != nil {
-		p.client.NetworkRemove(ctx, networkResp.ID)
 		return domain.Workspace{}, fmt.Errorf("creating container: %w", err)
 	}
 
 	log.Printf("[workspace] starting container %s", resp.ID[:12])
 	if err := p.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
 		p.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
-		p.client.NetworkRemove(ctx, networkResp.ID)
 		return domain.Workspace{}, fmt.Errorf("starting container: %w", err)
 	}
 	log.Printf("[workspace] %s is running (container=%s)", containerName, resp.ID[:12])
@@ -131,6 +238,74 @@ func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain
 		Config:    config,
 	}, nil
 }
+
+func (p *Provider) execInContainer(ctx context.Context, containerIDPrefix, cmd string) (int, error) {
+	// Find full container ID
+	containers, err := p.client.ContainerList(ctx, container.ListOptions{
+		Filters: filters.NewArgs(filters.Arg("label", "cordon.workspace")),
+	})
+	if err != nil {
+		return -1, err
+	}
+	var containerID string
+	for _, c := range containers {
+		if strings.HasPrefix(c.ID, containerIDPrefix) || strings.HasPrefix(c.Labels["cordon.workspace"], containerIDPrefix) {
+			containerID = c.ID
+			break
+		}
+	}
+	if containerID == "" {
+		return -1, fmt.Errorf("container not found")
+	}
+
+	execResp, err := p.client.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		Cmd:          []string{"sh", "-c", cmd},
+		AttachStdout: true,
+		AttachStderr: true,
+	})
+	if err != nil {
+		return -1, fmt.Errorf("creating exec: %w", err)
+	}
+
+	if err := p.client.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{}); err != nil {
+		return -1, fmt.Errorf("starting exec: %w", err)
+	}
+
+	for {
+		inspect, err := p.client.ContainerExecInspect(ctx, execResp.ID)
+		if err != nil {
+			return -1, err
+		}
+		if !inspect.Running {
+			return inspect.ExitCode, nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func (p *Provider) cloneURL(repo string) string {
+	if p.token == "" {
+		if !strings.Contains(repo, "://") {
+			return "https://" + repo
+		}
+		return repo
+	}
+	repoURL := repo
+	if !strings.Contains(repoURL, "://") {
+		repoURL = "https://" + repoURL
+	}
+	u, err := url.Parse(repoURL)
+	if err != nil {
+		return repoURL
+	}
+	if !strings.HasSuffix(u.Path, ".git") {
+		u.Path += ".git"
+	}
+	u.User = url.UserPassword("x-access-token", p.token)
+	return u.String()
+}
+
+// --- Read operations (unchanged) ---
 
 func (p *Provider) Get(ctx context.Context, tenantID, workspaceID uuid.UUID) (domain.Workspace, error) {
 	c, err := p.findContainer(ctx, tenantID, workspaceID)
@@ -163,10 +338,7 @@ func (p *Provider) Suspend(ctx context.Context, tenantID, workspaceID uuid.UUID)
 	if err != nil {
 		return err
 	}
-	if err := p.client.ContainerPause(ctx, c.ID); err != nil {
-		return fmt.Errorf("pausing container: %w", err)
-	}
-	return nil
+	return p.client.ContainerPause(ctx, c.ID)
 }
 
 func (p *Provider) Resume(ctx context.Context, tenantID, workspaceID uuid.UUID) error {
@@ -174,10 +346,7 @@ func (p *Provider) Resume(ctx context.Context, tenantID, workspaceID uuid.UUID) 
 	if err != nil {
 		return err
 	}
-	if err := p.client.ContainerUnpause(ctx, c.ID); err != nil {
-		return fmt.Errorf("unpausing container: %w", err)
-	}
-	return nil
+	return p.client.ContainerUnpause(ctx, c.ID)
 }
 
 func (p *Provider) Destroy(ctx context.Context, tenantID, workspaceID uuid.UUID) error {
@@ -193,7 +362,6 @@ func (p *Provider) Destroy(ctx context.Context, tenantID, workspaceID uuid.UUID)
 		log.Printf("[workspace] warning: container remove failed: %v", err)
 	}
 
-	// Find and remove associated network
 	networkName := ""
 	if len(c.Names) > 0 {
 		networkName = strings.TrimPrefix(c.Names[0], "/") + "-net"
@@ -214,13 +382,11 @@ func (p *Provider) Exec(ctx context.Context, tenantID, workspaceID uuid.UUID, cm
 		return -1, err
 	}
 
-	execConfig := container.ExecOptions{
+	execResp, err := p.client.ContainerExecCreate(ctx, c.ID, container.ExecOptions{
 		Cmd:          cmd,
 		AttachStdout: true,
 		AttachStderr: true,
-	}
-
-	execResp, err := p.client.ContainerExecCreate(ctx, c.ID, execConfig)
+	})
 	if err != nil {
 		return -1, fmt.Errorf("creating exec: %w", err)
 	}
@@ -257,7 +423,8 @@ func (p *Provider) ContainerID(workspaceID uuid.UUID) (string, error) {
 	return containers[0].ID, nil
 }
 
-// findContainer locates a running cordon container by workspace and tenant ID.
+// --- Internal helpers ---
+
 func (p *Provider) findContainer(ctx context.Context, tenantID, workspaceID uuid.UUID) (types.Container, error) {
 	containers, err := p.client.ContainerList(ctx, container.ListOptions{
 		All: true,
@@ -275,7 +442,6 @@ func (p *Provider) findContainer(ctx context.Context, tenantID, workspaceID uuid
 	return containers[0], nil
 }
 
-// containerToWorkspace maps a Docker container to a domain Workspace.
 func containerToWorkspace(c types.Container) domain.Workspace {
 	wsID, _ := uuid.Parse(c.Labels["cordon.workspace"])
 	tenantID, _ := uuid.Parse(c.Labels["cordon.tenant"])
@@ -306,6 +472,10 @@ func containerToWorkspace(c types.Container) domain.Workspace {
 		Status:    status,
 		CreatedAt: created,
 		ExpiresAt: expires,
+		Config: domain.WorkspaceConfig{
+			Repo:   c.Labels["cordon.repo"],
+			Branch: c.Labels["cordon.branch"],
+		},
 	}
 }
 

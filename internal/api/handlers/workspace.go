@@ -24,6 +24,7 @@ func NewWorkspaceHandler(service ports.WorkspaceService) *WorkspaceHandler {
 type CreateWorkspaceRequest struct {
 	Name             string `json:"name"`
 	Repo             string `json:"repo"`
+	Branch           string `json:"branch"`
 	DevcontainerPath string `json:"devcontainer_path"`
 	CPU              int    `json:"cpu"`
 	MemoryMB         int    `json:"memory_mb"`
@@ -34,6 +35,8 @@ type WorkspaceResponse struct {
 	TenantID  string `json:"tenant_id"`
 	Name      string `json:"name"`
 	Status    string `json:"status"`
+	Repo      string `json:"repo,omitempty"`
+	Branch    string `json:"branch,omitempty"`
 	CreatedAt string `json:"created_at"`
 	ExpiresAt string `json:"expires_at"`
 }
@@ -44,6 +47,8 @@ func toWorkspaceResponse(ws domain.Workspace) WorkspaceResponse {
 		TenantID:  ws.TenantID.String(),
 		Name:      ws.Name,
 		Status:    string(ws.Status),
+		Repo:      ws.Config.Repo,
+		Branch:    ws.Config.Branch,
 		CreatedAt: ws.CreatedAt.Format(time.RFC3339),
 		ExpiresAt: ws.ExpiresAt.Format(time.RFC3339),
 	}
@@ -77,6 +82,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		IdleTimeout:      15 * time.Minute,
 		MaxLifetime:      24 * time.Hour,
 		Repo:             req.Repo,
+		Branch:           req.Branch,
 	}
 
 	ws, err := h.service.Create(r.Context(), tenantID, config)

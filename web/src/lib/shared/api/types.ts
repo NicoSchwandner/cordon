@@ -67,6 +67,8 @@ export interface WorkspaceResponse {
   tenant_id: string;
   name: string;
   status: string;
+  repo?: string;
+  branch?: string;
   created_at: string;
   expires_at: string;
 }
@@ -74,6 +76,7 @@ export interface WorkspaceResponse {
 export interface CreateWorkspaceRequest {
   name: string;
   repo?: string;
+  branch?: string;
   devcontainer_path?: string;
   cpu?: number;
   memory_mb?: number;
