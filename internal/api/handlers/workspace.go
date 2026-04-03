@@ -3,6 +3,7 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ func NewWorkspaceHandler(service ports.WorkspaceService) *WorkspaceHandler {
 type CreateWorkspaceRequest struct {
 	Name             string `json:"name"`
 	Repo             string `json:"repo"`
+	BaseBranch       string `json:"base_branch"`
 	Branch           string `json:"branch"`
 	DevcontainerPath string `json:"devcontainer_path"`
 	CPU              int    `json:"cpu"`
@@ -82,11 +84,13 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		IdleTimeout:      15 * time.Minute,
 		MaxLifetime:      24 * time.Hour,
 		Repo:             req.Repo,
+		BaseBranch:       req.BaseBranch,
 		Branch:           req.Branch,
 	}
 
 	ws, err := h.service.Create(r.Context(), tenantID, config)
 	if err != nil {
+		log.Printf("[workspace] create failed: %v", err)
 		middleware.WriteProblem(w, domain.ProblemDetails{
 			Type: "https://cordon.dev/problems/workspace-create-failed", Title: "Create Failed",
 			Status: 500, Detail: err.Error(), Code: "workspace_create_failed",

@@ -2,9 +2,11 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -20,12 +22,19 @@ import (
 	"github.com/nicobistolfi/cordon/internal/infrastructure/devcontainer"
 )
 
+// gitIdentity holds the git user.name and user.email for configuring containers.
+type gitIdentity struct {
+	Name  string
+	Email string
+}
+
 // Provider manages Docker-based workspaces.
 // Container labels are the source of truth — no in-memory state survives restarts.
 type Provider struct {
 	client  *client.Client
 	builder *devcontainer.Builder // nil = bare containers only
 	token   string                // GitHub token for authenticated git operations
+	gitUser *gitIdentity          // resolved from GitHub API at startup
 }
 
 // NewProvider creates a Docker workspace provider.
@@ -47,7 +56,19 @@ func NewProvider(builder *devcontainer.Builder, token string) (*Provider, error)
 		log.Printf("[workspace] found %d existing cordon container(s) from previous run", len(existing))
 	}
 
-	return &Provider{client: cli, builder: builder, token: token}, nil
+	p := &Provider{client: cli, builder: builder, token: token}
+
+	// Resolve git identity from GitHub API
+	if token != "" {
+		if id, err := fetchGitHubUser(token); err != nil {
+			log.Printf("[workspace] warning: could not resolve git identity: %v", err)
+		} else {
+			log.Printf("[workspace] git identity: %s <%s>", id.Name, id.Email)
+			p.gitUser = id
+		}
+	}
+
+	return p, nil
 }
 
 func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
@@ -93,14 +114,21 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 	containerName := p.containerName(config.Name, wsID)
 	now := time.Now().UTC()
 
-	log.Printf("[workspace] creating devcontainer %s from %s (branch=%s)", containerName, config.Repo, config.Branch)
-
-	// Build the devcontainer image
+	// BaseBranch = build the devcontainer image from (where devcontainer.json lives)
+	// Branch = checkout this branch in the workspace
 	branch := config.Branch
 	if branch == "" {
-		branch = "main"
+		branch = "development"
 	}
-	result, err := p.builder.Build(ctx, config.Repo, branch, p.token, config.DevcontainerPath)
+	baseBranch := config.BaseBranch
+	if baseBranch == "" {
+		baseBranch = branch
+	}
+
+	log.Printf("[workspace] creating devcontainer %s from %s (base=%s, branch=%s)", containerName, config.Repo, baseBranch, branch)
+
+	// Build the devcontainer image from the base branch
+	result, err := p.builder.Build(ctx, config.Repo, baseBranch, p.token, config.DevcontainerPath)
 	if err != nil {
 		return domain.Workspace{}, fmt.Errorf("building devcontainer image: %w", err)
 	}
@@ -114,13 +142,20 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 	// Labels include repo metadata
 	labels := p.baseLabels(tenantID, wsID, config.Name, now, config.MaxLifetime)
 	labels["cordon.repo"] = config.Repo
+	labels["cordon.base-branch"] = baseBranch
 	labels["cordon.branch"] = branch
 	labels["cordon.workspace-folder"] = result.WorkspaceFolder
 
-	// Environment: merge devcontainer env + cordon env
+	// Environment: merge devcontainer env + cordon env + git auth
 	env := []string{
 		"ZT_WORKSPACE_ID=" + wsID.String(),
 		"ZT_TENANT_ID=" + tenantID.String(),
+	}
+	if p.token != "" {
+		env = append(env,
+			"GITHUB_TOKEN="+p.token,  // gh CLI reads this
+			"GH_TOKEN="+p.token,      // gh CLI also reads this
+		)
 	}
 	for k, v := range result.Env {
 		env = append(env, k+"="+v)
@@ -133,13 +168,47 @@ func (p *Provider) createFromRepo(ctx context.Context, tenantID uuid.UUID, confi
 		return domain.Workspace{}, err
 	}
 
+	cid := ws.ID.String()[:12]
+
+	// Install tmux for persistent terminal sessions
+	if _, err := p.execInContainer(ctx, cid, "command -v tmux >/dev/null 2>&1 || (apt-get update -qq && apt-get install -y -qq tmux >/dev/null 2>&1)"); err != nil {
+		log.Printf("[workspace] warning: tmux install failed: %v", err)
+	}
+
+	// Configure git: credential helper + user identity
+	if p.token != "" {
+		credHelper := `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'`
+		if _, err := p.execInContainer(ctx, cid, credHelper); err != nil {
+			log.Printf("[workspace] warning: git credential helper setup failed: %v", err)
+		}
+	}
+	if p.gitUser != nil {
+		gitCfg := fmt.Sprintf(`git config --global user.name "%s" && git config --global user.email "%s"`, p.gitUser.Name, p.gitUser.Email)
+		if _, err := p.execInContainer(ctx, cid, gitCfg); err != nil {
+			log.Printf("[workspace] warning: git identity setup failed: %v", err)
+		}
+	}
+
 	// Clone repo inside the running container
 	cloneURL := p.cloneURL(config.Repo)
+	log.Printf("[workspace] cloning repo inside container (branch=%s)", branch)
 	cloneCmd := fmt.Sprintf("git clone --branch %s %s %s", branch, cloneURL, result.WorkspaceFolder)
-	log.Printf("[workspace] cloning repo inside container")
-	if _, err := p.execInContainer(ctx, ws.ID.String()[:12], cloneCmd); err != nil {
-		log.Printf("[workspace] warning: clone failed: %v", err)
-		// Don't fail — container is still usable
+	if _, err := p.execInContainer(ctx, cid, cloneCmd); err != nil {
+		if branch != baseBranch {
+			// Branch doesn't exist yet — clone from base branch, then create the feature branch
+			log.Printf("[workspace] branch %s not found, cloning %s and creating branch", branch, baseBranch)
+			fallbackCmd := fmt.Sprintf("git clone --branch %s %s %s", baseBranch, cloneURL, result.WorkspaceFolder)
+			if _, err := p.execInContainer(ctx, cid, fallbackCmd); err != nil {
+				log.Printf("[workspace] warning: clone failed: %v", err)
+			} else {
+				checkoutCmd := fmt.Sprintf("cd %s && git checkout -b %s", result.WorkspaceFolder, branch)
+				if _, err := p.execInContainer(ctx, cid, checkoutCmd); err != nil {
+					log.Printf("[workspace] warning: creating branch %s failed: %v", branch, err)
+				}
+			}
+		} else {
+			log.Printf("[workspace] warning: clone failed: %v", err)
+		}
 	}
 
 	// Run postCreateCommand
@@ -277,7 +346,10 @@ func (p *Provider) execInContainer(ctx context.Context, containerIDPrefix, cmd s
 			return -1, err
 		}
 		if !inspect.Running {
-			return inspect.ExitCode, nil
+			if inspect.ExitCode != 0 {
+				return inspect.ExitCode, fmt.Errorf("command exited with code %d", inspect.ExitCode)
+			}
+			return 0, nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -408,7 +480,21 @@ func (p *Provider) Exec(ctx context.Context, tenantID, workspaceID uuid.UUID, cm
 }
 
 // ContainerID returns the Docker container ID for a workspace (for terminal relay).
+// ContainerInfo holds container metadata needed by the terminal handler.
+type ContainerInfo struct {
+	ID              string
+	WorkspaceFolder string // from cordon.workspace-folder label
+}
+
 func (p *Provider) ContainerID(workspaceID uuid.UUID) (string, error) {
+	info, err := p.ContainerInfo(workspaceID)
+	if err != nil {
+		return "", err
+	}
+	return info.ID, nil
+}
+
+func (p *Provider) ContainerInfo(workspaceID uuid.UUID) (ContainerInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -418,9 +504,12 @@ func (p *Provider) ContainerID(workspaceID uuid.UUID) (string, error) {
 		),
 	})
 	if err != nil || len(containers) == 0 {
-		return "", fmt.Errorf("workspace not found")
+		return ContainerInfo{}, fmt.Errorf("workspace not found")
 	}
-	return containers[0].ID, nil
+	return ContainerInfo{
+		ID:              containers[0].ID,
+		WorkspaceFolder: containers[0].Labels["cordon.workspace-folder"],
+	}, nil
 }
 
 // --- Internal helpers ---
@@ -473,10 +562,48 @@ func containerToWorkspace(c types.Container) domain.Workspace {
 		CreatedAt: created,
 		ExpiresAt: expires,
 		Config: domain.WorkspaceConfig{
-			Repo:   c.Labels["cordon.repo"],
-			Branch: c.Labels["cordon.branch"],
+			Repo:       c.Labels["cordon.repo"],
+			BaseBranch: c.Labels["cordon.base-branch"],
+			Branch:     c.Labels["cordon.branch"],
 		},
 	}
+}
+
+// fetchGitHubUser queries the GitHub API for the authenticated user's name and email.
+func fetchGitHubUser(token string) (*gitIdentity, error) {
+	req, _ := http.NewRequest("GET", "https://api.github.com/user", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.github+json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+	}
+
+	var user struct {
+		Name  string `json:"name"`
+		Login string `json:"login"`
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return nil, err
+	}
+
+	name := user.Name
+	if name == "" {
+		name = user.Login
+	}
+	email := user.Email
+	if email == "" {
+		email = user.Login + "@users.noreply.github.com"
+	}
+
+	return &gitIdentity{Name: name, Email: email}, nil
 }
 
 func sanitizeContainerName(name string) string {

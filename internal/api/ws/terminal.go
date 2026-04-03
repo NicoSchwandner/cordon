@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -57,12 +58,13 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get container ID
-	containerID, err := h.provider.ContainerID(wsID)
+	// Get container info
+	info, err := h.provider.ContainerInfo(wsID)
 	if err != nil {
 		http.Error(w, "workspace not found", http.StatusNotFound)
 		return
 	}
+	containerID := info.ID
 
 	// Accept WebSocket
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -76,9 +78,22 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	ctx := r.Context()
 
+	// Build tmux command: create-or-attach a persistent session.
+	// If tmux isn't available, fall back to a plain shell.
+	shell := "if command -v bash >/dev/null 2>&1; then exec bash -li; else exec sh -i; fi"
+	startDir := info.WorkspaceFolder
+	if startDir == "" {
+		startDir = "/"
+	}
+	tmuxCmd := fmt.Sprintf(
+		`if command -v tmux >/dev/null 2>&1; then tmux new-session -As cordon -c %s; else cd %s && %s; fi`,
+		startDir, startDir, shell,
+	)
+
 	// Create exec with PTY
 	execConfig := container.ExecOptions{
-		Cmd:          []string{"/bin/sh", "-c", "if command -v bash >/dev/null 2>&1; then exec bash; else exec sh; fi"},
+		Cmd:          []string{"/bin/sh", "-c", tmuxCmd},
+		Env:          []string{"TERM=xterm-256color"},
 		AttachStdin:  true,
 		AttachStdout: true,
 		AttachStderr: true,

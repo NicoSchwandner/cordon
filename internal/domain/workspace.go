@@ -34,6 +34,7 @@ type WorkspaceConfig struct {
 	IdleTimeout      time.Duration
 	MaxLifetime      time.Duration
 	Repo             string
-	Branch           string
+	BaseBranch       string // branch to build devcontainer image from (default: same as Branch)
+	Branch           string // branch to checkout in the workspace
 	AllowSSH         bool
 }

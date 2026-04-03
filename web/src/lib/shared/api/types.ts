@@ -76,6 +76,7 @@ export interface WorkspaceResponse {
 export interface CreateWorkspaceRequest {
   name: string;
   repo?: string;
+  base_branch?: string;
   branch?: string;
   devcontainer_path?: string;
   cpu?: number;

@@ -88,6 +88,14 @@ export function connectTerminalWS(workspaceId: string): TerminalWS {
   ws.binaryType = "arraybuffer";
   let dataCb: ((data: string | Uint8Array) => void) | null = null;
   const pending: (string | Uint8Array)[] = [];
+  let pendingResize: { cols: number; rows: number } | null = null;
+
+  ws.onopen = () => {
+    if (pendingResize) {
+      ws.send(JSON.stringify({ type: "resize", ...pendingResize }));
+      pendingResize = null;
+    }
+  };
 
   ws.onmessage = (ev) => {
     const chunk =
@@ -106,6 +114,8 @@ export function connectTerminalWS(workspaceId: string): TerminalWS {
     resize: (cols: number, rows: number) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: "resize", cols, rows }));
+      } else {
+        pendingResize = { cols, rows };
       }
     },
     onData: (cb) => {

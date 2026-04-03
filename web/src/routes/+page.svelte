@@ -11,6 +11,7 @@
 	let showForm = $state(false);
 	let newName = $state('');
 	let newRepo = $state('');
+	let newBaseBranch = $state('');
 	let newBranch = $state('');
 	let creating = $state(false);
 	let extraWorkspaces: WorkspaceResponse[] = $state([]);
@@ -25,13 +26,12 @@
 			if (newRepo.trim()) {
 				req.repo = newRepo.trim();
 				req.branch = newBranch.trim() || 'development';
+				if (newBaseBranch.trim()) {
+					req.base_branch = newBaseBranch.trim();
+				}
 			}
 			const ws = await createWorkspace(req);
-			extraWorkspaces = [ws, ...extraWorkspaces];
-			newName = '';
-			newRepo = '';
-			newBranch = '';
-			showForm = false;
+			window.location.href = `/workspace/${ws.id}`;
 		} catch (e) {
 			alert(e instanceof Error ? e.message : 'Failed to create workspace');
 		}
@@ -91,14 +91,25 @@
 					/>
 				</div>
 				{#if hasRepo}
-					<div>
-						<label for="ws-branch" class="mb-1 block text-xs font-medium text-foreground-muted">Branch</label>
-						<input
-							id="ws-branch"
-							bind:value={newBranch}
-							placeholder="development"
-							class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
-						/>
+					<div class="grid gap-3 sm:grid-cols-2">
+						<div>
+							<label for="ws-base-branch" class="mb-1 block text-xs font-medium text-foreground-muted">Base branch <span class="font-normal text-foreground-faint">(devcontainer source)</span></label>
+							<input
+								id="ws-base-branch"
+								bind:value={newBaseBranch}
+								placeholder="same as branch"
+								class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+							/>
+						</div>
+						<div>
+							<label for="ws-branch" class="mb-1 block text-xs font-medium text-foreground-muted">Branch <span class="font-normal text-foreground-faint">(checkout in workspace)</span></label>
+							<input
+								id="ws-branch"
+								bind:value={newBranch}
+								placeholder="development"
+								class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+							/>
+						</div>
 					</div>
 				{/if}
 				<div>
