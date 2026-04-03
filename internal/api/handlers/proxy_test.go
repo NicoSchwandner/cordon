@@ -127,6 +127,129 @@ func TestSQLProxyEgressBlocked(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyForwardsToUpstream(t *testing.T) {
+	// Spin up a fake upstream server
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Custom", "upstream-header")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"message":"hello from upstream"}`))
+	}))
+	defer upstream.Close()
+
+	// Parse upstream URL to get host
+	upstreamHost := upstream.Listener.Addr().String()
+
+	handler, auth := newTestServer()
+	// Override the handler's HTTP client to use http:// (upstream is plain HTTP)
+	handler.client.Transport = &http.Transport{}
+
+	// Add upstream host to the egress allowlist by recreating the pipeline
+	tenantID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+	vault := sops.NewMemoryVault()
+	vault.AddSecret(tenantID, "DB", "cordon-placeholder-db", "real-db")
+
+	handler.pipeline = proxy.NewPipeline(proxy.PipelineConfig{
+		SQLClassifier:   proxy.NewSQLClassifier(),
+		HTTPClassifier:  proxy.NewHTTPClassifier(),
+		Swapper:         proxy.NewSecretSwapper(vault),
+		Egress:          proxy.NewEgressChecker([]string{"127.0.0.1"}),
+		ApprovalTimeout: 100 * time.Millisecond,
+	})
+
+	body, _ := json.Marshal(HTTPProxyRequest{
+		Method: "GET",
+		Host:   upstreamHost,
+		URL:    upstream.URL + "/api/test", // full URL so handler uses http://
+		Caller: "test-agent",
+	})
+
+	req := httptest.NewRequest("POST", "/api/proxy/http", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	authMW := middleware.Auth(auth)
+	authMW(http.HandlerFunc(handler.HTTP)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", w.Code, w.Body.String())
+	}
+
+	var result ProxyResult
+	json.Unmarshal(w.Body.Bytes(), &result)
+
+	if !result.Allowed {
+		t.Error("GET should be allowed")
+	}
+	if result.UpstreamStatus != 200 {
+		t.Errorf("upstream_status = %d, want 200", result.UpstreamStatus)
+	}
+	if result.UpstreamBody != `{"message":"hello from upstream"}` {
+		t.Errorf("upstream_body = %q, want hello from upstream", result.UpstreamBody)
+	}
+	if result.UpstreamHeaders["X-Custom"] != "upstream-header" {
+		t.Errorf("upstream_headers missing X-Custom, got %v", result.UpstreamHeaders)
+	}
+}
+
+func TestHTTPProxyUpstreamSecretSwap(t *testing.T) {
+	// Verify that secrets are swapped before reaching upstream
+	var receivedAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("ok"))
+	}))
+	defer upstream.Close()
+
+	upstreamHost := upstream.Listener.Addr().String()
+	tenantID := uuid.MustParse("00000000-0000-0000-0000-000000000001")
+
+	vault := sops.NewMemoryVault()
+	vault.AddSecret(tenantID, "API_KEY", "cordon-placeholder-api-key", "real-secret-key")
+
+	pipeline := proxy.NewPipeline(proxy.PipelineConfig{
+		SQLClassifier:   proxy.NewSQLClassifier(),
+		HTTPClassifier:  proxy.NewHTTPClassifier(),
+		Swapper:         proxy.NewSecretSwapper(vault),
+		Egress:          proxy.NewEgressChecker([]string{"127.0.0.1"}),
+		ApprovalTimeout: 100 * time.Millisecond,
+	})
+
+	handler := &ProxyHandler{
+		pipeline: pipeline,
+		client:   &http.Client{Timeout: 5 * time.Second},
+	}
+	auth := &middleware.StaticAuth{TenantID: tenantID, UserID: "test-user"}
+
+	body, _ := json.Marshal(HTTPProxyRequest{
+		Method:  "GET",
+		Host:    upstreamHost,
+		URL:     upstream.URL + "/api/test",
+		Headers: map[string]string{"Authorization": "Bearer cordon-placeholder-api-key"},
+		Caller:  "test-agent",
+	})
+
+	req := httptest.NewRequest("POST", "/api/proxy/http", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	middleware.Auth(auth)(http.HandlerFunc(handler.HTTP)).ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200. Body: %s", w.Code, w.Body.String())
+	}
+
+	// The upstream should have received the REAL secret, not the placeholder
+	if receivedAuth != "Bearer real-secret-key" {
+		t.Errorf("upstream received auth = %q, want 'Bearer real-secret-key'", receivedAuth)
+	}
+
+	// But the proxy response should NOT contain the real secret
+	var result ProxyResult
+	json.Unmarshal(w.Body.Bytes(), &result)
+	if result.UpstreamStatus != 200 {
+		t.Errorf("upstream_status = %d, want 200", result.UpstreamStatus)
+	}
+}
+
 func TestUnauthenticatedRequest(t *testing.T) {
 	handler, _ := newTestServer()
 

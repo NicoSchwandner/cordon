@@ -3,6 +3,9 @@ export interface ProxyResult {
   tier: number;
   decision: string;
   error?: string;
+  upstream_status?: number;
+  upstream_headers?: Record<string, string>;
+  upstream_body?: string;
 }
 
 export interface SQLProxyRequest {

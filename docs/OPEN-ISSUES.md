@@ -110,12 +110,9 @@ This is the linchpin for database investigation workflows — developers keep th
 
 ## HTTP Proxy Forwarding
 
-**Status:** Deferred
-**Impact:** Security — proxy classifies requests but doesn't make the actual outbound call
+**Status:** Done
 
-The current HTTP proxy classifies, swaps secrets, and returns the modified request — but the agent must make the actual outbound HTTP call itself. This means the workspace still needs direct network access to target services, undermining the zero-trust boundary.
-
-**Planned approach:** The proxy should be a true forward proxy: receive the request, classify it, swap secrets, make the outbound call on behalf of the agent, and return the response. The workspace has no direct internet access — all HTTP goes through the proxy.
+**Implementation:** The proxy is now a true forward proxy. When a request is allowed, the handler builds an outbound HTTP request from the secret-swapped `ModifiedReq`, executes it via `http.Client` (30s timeout, no redirect following), and relays the upstream response (status, headers, body) back to the agent. The agent never needs direct network access or real credentials — both stay on the Cordon server. Response bodies are capped at 1MB.
 
 ## Network-Level Egress Enforcement
 

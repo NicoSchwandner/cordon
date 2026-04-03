@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 )
@@ -66,7 +67,8 @@ func proxySQLCmd() *cobra.Command {
 }
 
 func proxyHTTPCmd() *cobra.Command {
-	var host, caller string
+	var host, caller, reqBody string
+	var headers []string
 
 	cmd := &cobra.Command{
 		Use:   "http <method> <url>",
@@ -74,13 +76,28 @@ func proxyHTTPCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			method, url := args[0], args[1]
-			body, _ := json.Marshal(map[string]string{
+
+			reqMap := map[string]any{
 				"method": method,
 				"url":    url,
 				"host":   host,
 				"caller": caller,
-			})
+			}
+			if reqBody != "" {
+				reqMap["body"] = reqBody
+			}
+			if len(headers) > 0 {
+				h := make(map[string]string)
+				for _, hdr := range headers {
+					parts := strings.SplitN(hdr, ":", 2)
+					if len(parts) == 2 {
+						h[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+					}
+				}
+				reqMap["headers"] = h
+			}
 
+			body, _ := json.Marshal(reqMap)
 			resp, err := http.Post(serverURL+"/api/proxy/http", "application/json", bytes.NewReader(body))
 			if err != nil {
 				return fmt.Errorf("request failed: %w", err)
@@ -97,14 +114,33 @@ func proxyHTTPCmd() *cobra.Command {
 				os.Exit(1)
 			}
 
-			var pretty bytes.Buffer
-			json.Indent(&pretty, data, "", "  ")
-			fmt.Println(pretty.String())
+			var result struct {
+				Allowed        bool              `json:"allowed"`
+				Tier           int               `json:"tier"`
+				Decision       string            `json:"decision"`
+				UpstreamStatus int               `json:"upstream_status"`
+				UpstreamHeaders map[string]string `json:"upstream_headers"`
+				UpstreamBody   string            `json:"upstream_body"`
+			}
+			json.Unmarshal(data, &result)
+
+			if result.UpstreamStatus > 0 {
+				// Forward proxy mode — show upstream response
+				fmt.Printf("HTTP %d (tier %d, %s)\n", result.UpstreamStatus, result.Tier, result.Decision)
+				fmt.Println(result.UpstreamBody)
+			} else {
+				// Classify-only mode (no upstream call)
+				var pretty bytes.Buffer
+				json.Indent(&pretty, data, "", "  ")
+				fmt.Println(pretty.String())
+			}
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&host, "host", "", "Target host for egress check")
 	cmd.Flags().StringVar(&caller, "caller", "cli-user", "Caller identity")
+	cmd.Flags().StringVarP(&reqBody, "data", "d", "", "Request body")
+	cmd.Flags().StringArrayVarP(&headers, "header", "H", nil, "Request header (key: value)")
 	return cmd
 }

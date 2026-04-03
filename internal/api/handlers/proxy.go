@@ -1,21 +1,34 @@
 package handlers
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"time"
 
 	"github.com/nicobistolfi/cordon/internal/api/middleware"
 	"github.com/nicobistolfi/cordon/internal/application/proxy"
+	"github.com/nicobistolfi/cordon/internal/domain"
 )
 
 // ProxyHandler handles SQL and HTTP proxy requests.
 type ProxyHandler struct {
 	pipeline *proxy.Pipeline
+	client   *http.Client
 }
 
 func NewProxyHandler(pipeline *proxy.Pipeline) *ProxyHandler {
-	return &ProxyHandler{pipeline: pipeline}
+	return &ProxyHandler{
+		pipeline: pipeline,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse // don't follow redirects
+			},
+		},
+	}
 }
 
 // SQLRequest is the JSON body for POST /api/proxy/sql
@@ -27,10 +40,13 @@ type SQLRequest struct {
 
 // ProxyResult is the JSON response for proxy operations.
 type ProxyResult struct {
-	Allowed  bool   `json:"allowed"`
-	Tier     int    `json:"tier"`
-	Decision string `json:"decision"`
-	Error    string `json:"error,omitempty"`
+	Allowed         bool              `json:"allowed"`
+	Tier            int               `json:"tier"`
+	Decision        string            `json:"decision"`
+	Error           string            `json:"error,omitempty"`
+	UpstreamStatus  int               `json:"upstream_status,omitempty"`
+	UpstreamHeaders map[string]string `json:"upstream_headers,omitempty"`
+	UpstreamBody    string            `json:"upstream_body,omitempty"`
 }
 
 func (h *ProxyHandler) SQL(w http.ResponseWriter, r *http.Request) {
@@ -99,14 +115,14 @@ func (h *ProxyHandler) HTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	proxyReq := proxy.ProxyRequest{
-		QueryType:   proxy.QueryTypeHTTP,
-		Method:      req.Method,
-		Path:        req.URL,
-		Host:        req.Host,
-		Headers:     req.Headers,
-		Body:        []byte(req.Body),
-		TenantID:    tenantID,
-		Caller:      caller,
+		QueryType: proxy.QueryTypeHTTP,
+		Method:    req.Method,
+		Path:      req.URL,
+		Host:      req.Host,
+		Headers:   req.Headers,
+		Body:      []byte(req.Body),
+		TenantID:  tenantID,
+		Caller:    caller,
 	}
 
 	resp := h.pipeline.Process(r.Context(), proxyReq)
@@ -117,9 +133,85 @@ func (h *ProxyHandler) HTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if !resp.Allowed || resp.ModifiedReq == nil {
+		json.NewEncoder(w).Encode(ProxyResult{
+			Allowed:  resp.Allowed,
+			Tier:     int(resp.Tier),
+			Decision: string(resp.Decision),
+		})
+		return
+	}
+
+	// Execute the outbound HTTP call with secret-swapped request
+	upstreamResult, err := h.executeUpstream(r.Context(), resp.ModifiedReq)
+	if err != nil {
+		middleware.WriteProblem(w, domain.ProblemDetails{
+			Type:   "https://cordon.dev/problems/upstream-failed",
+			Title:  "Upstream Request Failed",
+			Status: 502,
+			Detail: err.Error(),
+			Code:   "upstream_failed",
+		})
+		return
+	}
+
 	json.NewEncoder(w).Encode(ProxyResult{
-		Allowed:  resp.Allowed,
-		Tier:     int(resp.Tier),
-		Decision: string(resp.Decision),
+		Allowed:         true,
+		Tier:            int(resp.Tier),
+		Decision:        string(resp.Decision),
+		UpstreamStatus:  upstreamResult.Status,
+		UpstreamHeaders: upstreamResult.Headers,
+		UpstreamBody:    upstreamResult.Body,
 	})
+}
+
+// upstreamResponse holds the result of an outbound HTTP call.
+type upstreamResponse struct {
+	Status  int
+	Headers map[string]string
+	Body    string
+}
+
+// executeUpstream builds and executes an HTTP request from the secret-swapped proxy request.
+func (h *ProxyHandler) executeUpstream(ctx context.Context, modified *proxy.ProxyRequest) (*upstreamResponse, error) {
+	url := modified.Path
+	if len(url) == 0 || url[0] == '/' {
+		url = "https://" + modified.Host + url
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, modified.Method, url, bytes.NewReader(modified.Body))
+	if err != nil {
+		return nil, err
+	}
+
+	for k, v := range modified.Headers {
+		httpReq.Header.Set(k, v)
+	}
+	if httpReq.Header.Get("Host") == "" {
+		httpReq.Host = modified.Host
+	}
+
+	resp, err := h.client.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// Cap response body at 1MB to prevent memory issues
+	const maxBody = 1 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return nil, err
+	}
+
+	headers := make(map[string]string)
+	for k := range resp.Header {
+		headers[k] = resp.Header.Get(k)
+	}
+
+	return &upstreamResponse{
+		Status:  resp.StatusCode,
+		Headers: headers,
+		Body:    string(body),
+	}, nil
 }
