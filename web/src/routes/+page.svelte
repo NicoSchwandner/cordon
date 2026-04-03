@@ -3,8 +3,12 @@
 	import DecisionBadge from '$lib/shared/components/DecisionBadge.svelte';
 	import TimeAgo from '$lib/shared/components/TimeAgo.svelte';
 	import StatusDot from '$lib/shared/components/StatusDot.svelte';
+	import { getContext } from 'svelte';
 	import { createWorkspace, getDefaultBranch } from '$lib/shared/api/client';
 	import type { WorkspaceResponse } from '$lib/shared/api/types';
+
+	const getHealthy = getContext<() => boolean | null>('healthy');
+	const healthy = $derived(getHealthy());
 
 	let { data } = $props();
 
@@ -66,12 +70,14 @@
 		<h1 class="text-2xl font-semibold tracking-tight text-foreground">Dashboard</h1>
 		<div class="flex items-center gap-2">
 			<span
-				class="inline-block h-2.5 w-2.5 rounded-full {data.healthy
+				class="inline-block h-2.5 w-2.5 rounded-full {healthy
 					? 'bg-success-text'
-					: 'bg-danger-solid'}"
+					: healthy === false
+						? 'bg-danger-solid'
+						: 'bg-foreground-faint'}"
 			></span>
 			<span class="text-sm text-foreground-muted"
-				>{data.healthy ? 'System healthy' : 'Unhealthy'}</span
+				>{healthy ? 'System healthy' : healthy === false ? 'Unhealthy' : 'Checking...'}</span
 			>
 		</div>
 	</div>

@@ -1,11 +1,13 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import { setContext } from 'svelte';
 	import { page } from '$app/state';
 	import { getHealth } from '$lib/shared/api/client';
 
 	let { children }: { children: Snippet } = $props();
 
 	let healthy = $state<boolean | null>(null);
+	setContext('healthy', () => healthy);
 
 	$effect(() => {
 		getHealth()
