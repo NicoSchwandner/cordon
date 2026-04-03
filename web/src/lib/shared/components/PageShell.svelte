@@ -1,11 +1,11 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import { page } from '$app/state';
 	import { getHealth } from '$lib/shared/api/client';
 
 	let { children }: { children: Snippet } = $props();
 
 	let healthy = $state<boolean | null>(null);
-	let currentPath = $state(typeof window !== 'undefined' ? window.location.pathname : '/');
 
 	$effect(() => {
 		getHealth()
@@ -19,15 +19,6 @@
 		return () => clearInterval(id);
 	});
 
-	// Update path on navigation
-	$effect(() => {
-		function update() {
-			currentPath = window.location.pathname;
-		}
-		window.addEventListener('popstate', update);
-		return () => window.removeEventListener('popstate', update);
-	});
-
 	const navItems = [
 		{ href: '/', label: 'Dashboard', exact: true },
 		{ href: '/audit', label: 'Audit Log', exact: false },
@@ -35,8 +26,9 @@
 	];
 
 	function isActive(item: (typeof navItems)[0]) {
-		if (item.exact) return currentPath === item.href;
-		return currentPath.startsWith(item.href);
+		const path = page.url.pathname;
+		if (item.exact) return path === item.href;
+		return path.startsWith(item.href);
 	}
 </script>
 
