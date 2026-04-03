@@ -21,7 +21,7 @@ func workspaceCmd() *cobra.Command {
 		Aliases: []string{"ws"},
 		Short:   "Manage workspaces",
 	}
-	cmd.AddCommand(wsCreateCmd(), wsListCmd(), wsDestroyCmd(), wsExecCmd())
+	cmd.AddCommand(wsCreateCmd(), wsListCmd(), wsDestroyCmd(), wsExecCmd(), wsCatalogCmd())
 	return cmd
 }
 
@@ -355,6 +355,87 @@ Examples:
 	}
 
 	cmd.Flags().StringVar(&repo, "repo", "", "Target repo's service container")
+	return cmd
+}
+
+func wsCatalogCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "catalog <org>",
+		Short: "List available repos from a GitHub organization",
+		Long: `Browse the repo catalog for a GitHub organization. Shows all
+non-archived repos with their default branch and description.
+
+Example:
+  cordon ws catalog WintDev
+  cordon ws catalog WintDev --all    # include archived repos`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			org := args[0]
+			showAll, _ := cmd.Flags().GetBool("all")
+
+			resp, err := http.Get(serverURL + "/api/github/orgs/" + org + "/repos")
+			if err != nil {
+				return fmt.Errorf("request failed: %w", err)
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != 200 {
+				data, _ := io.ReadAll(resp.Body)
+				return fmt.Errorf("server error (%d): %s", resp.StatusCode, string(data))
+			}
+
+			var repos []struct {
+				Name          string `json:"name"`
+				DefaultBranch string `json:"default_branch"`
+				Description   string `json:"description"`
+				Language      string `json:"language"`
+				Archived      bool   `json:"archived"`
+				Private       bool   `json:"private"`
+			}
+			data, _ := io.ReadAll(resp.Body)
+			json.Unmarshal(data, &repos)
+
+			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+			fmt.Fprintln(w, "REPO\tBRANCH\tLANG\tDESCRIPTION")
+			for _, r := range repos {
+				if r.Archived && !showAll {
+					continue
+				}
+				name := r.Name
+				if r.Archived {
+					name += " (archived)"
+				}
+				if r.Private {
+					name += " *"
+				}
+				desc := r.Description
+				if len(desc) > 60 {
+					desc = desc[:57] + "..."
+				}
+				fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", name, r.DefaultBranch, r.Language, desc)
+			}
+			w.Flush()
+
+			count := 0
+			archived := 0
+			for _, r := range repos {
+				if r.Archived {
+					archived++
+				} else {
+					count++
+				}
+			}
+			fmt.Printf("\n%d repos", count)
+			if archived > 0 && !showAll {
+				fmt.Printf(" (%d archived hidden, use --all to show)", archived)
+			}
+			fmt.Println()
+
+			return nil
+		},
+	}
+
+	cmd.Flags().Bool("all", false, "Include archived repos")
 	return cmd
 }
 

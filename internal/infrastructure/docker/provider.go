@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -25,29 +23,25 @@ import (
 	"github.com/nicobistolfi/cordon/internal/application/progress"
 	"github.com/nicobistolfi/cordon/internal/domain"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/devcontainer"
+	gh "github.com/nicobistolfi/cordon/internal/infrastructure/github"
 )
-
-// gitIdentity holds the git user.name and user.email for configuring containers.
-type gitIdentity struct {
-	Name  string
-	Email string
-}
 
 // Provider manages Docker-based workspaces.
 // Container labels are the source of truth — no in-memory state survives restarts.
 type Provider struct {
-	client          *client.Client
-	builder         *devcontainer.Builder // nil = bare containers only
-	token           string                // GitHub token for authenticated git operations
-	gitUser         *gitIdentity          // resolved from GitHub API at startup
-	defaultBranches sync.Map              // repo URL -> default branch name
-	progress        *progress.Store       // optional progress event emitter
+	client   *client.Client
+	builder  *devcontainer.Builder // nil = bare containers only
+	token    string                // GitHub token for authenticated git operations
+	gitUser  *gh.GitIdentity       // resolved from GitHub API at startup
+	github   *gh.Client            // shared GitHub API client
+	progress *progress.Store       // optional progress event emitter
 }
 
 // NewProvider creates a Docker workspace provider.
 // builder may be nil (devcontainer features disabled).
 // token may be empty (only public repos supported).
-func NewProvider(builder *devcontainer.Builder, token string) (*Provider, error) {
+// ghClient provides shared GitHub API access (may be nil).
+func NewProvider(builder *devcontainer.Builder, token string, ghClient *gh.Client) (*Provider, error) {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return nil, fmt.Errorf("creating docker client: %w", err)
@@ -63,11 +57,11 @@ func NewProvider(builder *devcontainer.Builder, token string) (*Provider, error)
 		log.Printf("[workspace] found %d existing cordon container(s) from previous run", len(existing))
 	}
 
-	p := &Provider{client: cli, builder: builder, token: token}
+	p := &Provider{client: cli, builder: builder, token: token, github: ghClient}
 
 	// Resolve git identity from GitHub API
-	if token != "" {
-		if id, err := fetchGitHubUser(token); err != nil {
+	if ghClient != nil && ghClient.HasToken() {
+		if id, err := ghClient.FetchUser(); err != nil {
 			log.Printf("[workspace] warning: could not resolve git identity: %v", err)
 		} else {
 			log.Printf("[workspace] git identity: %s <%s>", id.Name, id.Email)
@@ -76,6 +70,11 @@ func NewProvider(builder *devcontainer.Builder, token string) (*Provider, error)
 	}
 
 	return p, nil
+}
+
+// GitHub returns the shared GitHub client for use by handlers.
+func (p *Provider) GitHub() *gh.Client {
+	return p.github
 }
 
 // SetProgressStore attaches a progress store for emitting creation events.
@@ -957,114 +956,12 @@ func containerToWorkspace(c types.Container) domain.Workspace {
 	}
 }
 
-// fetchGitHubUser queries the GitHub API for the authenticated user's name and email.
-func fetchGitHubUser(token string) (*gitIdentity, error) {
-	req, _ := http.NewRequest("GET", "https://api.github.com/user", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
-	}
-
-	var user struct {
-		Name  string `json:"name"`
-		Login string `json:"login"`
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return nil, err
-	}
-
-	name := user.Name
-	if name == "" {
-		name = user.Login
-	}
-	email := user.Email
-	if email == "" {
-		email = user.Login + "@users.noreply.github.com"
-	}
-
-	return &gitIdentity{Name: name, Email: email}, nil
-}
-
-// ResolveDefaultBranch returns the default branch for a repo, querying GitHub API
-// and caching the result. Falls back to "main" on any error.
+// ResolveDefaultBranch returns the default branch for a repo, delegating to the shared GitHub client.
 func (p *Provider) ResolveDefaultBranch(repoURL string) string {
-	if cached, ok := p.defaultBranches.Load(repoURL); ok {
-		return cached.(string)
+	if p.github != nil {
+		return p.github.ResolveDefaultBranch(repoURL)
 	}
-
-	branch := "main"
-	if p.token != "" {
-		if owner, repo, err := parseOwnerRepo(repoURL); err == nil {
-			if b, err := fetchDefaultBranch(p.token, owner, repo); err == nil {
-				branch = b
-			} else {
-				log.Printf("[workspace] warning: could not detect default branch for %s: %v", repoURL, err)
-			}
-		}
-	}
-
-	p.defaultBranches.Store(repoURL, branch)
-	return branch
-}
-
-// parseOwnerRepo extracts owner and repo from a GitHub URL.
-// Handles: "github.com/org/repo", "https://github.com/org/repo.git", etc.
-func parseOwnerRepo(repoURL string) (string, string, error) {
-	raw := repoURL
-	if !strings.Contains(raw, "://") {
-		raw = "https://" + raw
-	}
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", "", err
-	}
-	if !strings.Contains(u.Host, "github.com") {
-		return "", "", fmt.Errorf("not a GitHub URL: %s", repoURL)
-	}
-	path := strings.Trim(u.Path, "/")
-	path = strings.TrimSuffix(path, ".git")
-	parts := strings.SplitN(path, "/", 3)
-	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
-		return "", "", fmt.Errorf("cannot parse owner/repo from %s", repoURL)
-	}
-	return parts[0], parts[1], nil
-}
-
-// fetchDefaultBranch queries the GitHub API for a repository's default branch.
-func fetchDefaultBranch(token, owner, repo string) (string, error) {
-	req, _ := http.NewRequest("GET", fmt.Sprintf("https://api.github.com/repos/%s/%s", owner, repo), nil)
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("Accept", "application/vnd.github+json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("GitHub API returned %d", resp.StatusCode)
-	}
-
-	var result struct {
-		DefaultBranch string `json:"default_branch"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	if result.DefaultBranch == "" {
-		return "main", nil
-	}
-	return result.DefaultBranch, nil
+	return "main"
 }
 
 func sanitizeContainerName(name string) string {

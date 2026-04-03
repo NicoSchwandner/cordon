@@ -169,6 +169,32 @@ When a user approves a T3 operation with "session" or "pattern" scope, that gran
 
 **Planned approach:** Persist grants to PostgreSQL alongside audit entries. Grants have TTLs and are scoped to tenant + workspace. Expired grants are cleaned up automatically.
 
+## Investigation Workspaces
+
+**Status:** Deferred
+**Impact:** UX — investigation workflows spanning 100+ repos require per-repo workspaces today
+
+When debugging cross-service issues, developers often don't know which repos are relevant upfront. They need to search code across an entire organization (100+ repos), then narrow down to 2-3 repos for actual development. Currently this requires creating separate workspaces per repo — a workflow that doesn't scale.
+
+**Planned approach:** A new workspace mode optimized for exploration:
+
+1. **Shallow-clone catalog** — `git clone --depth 1` all repos from a configured GitHub org into a single container. Provides full `grep`/`ripgrep` search across the entire codebase with minimal disk usage (~5-50MB per repo).
+2. **On-demand "activate"** — When the developer identifies repos to work in, they "activate" them: deep-fetch (full history), branch checkout, optional service container spin-up. Uses the existing multi-repo workspace infrastructure.
+3. **Promote to development** — An investigation workspace with activated repos effectively becomes a development workspace. The transition is a label change, not a structural migration.
+
+**Key design decisions (from council review):**
+
+- Shallow repos stored as URL strings in `InvestigationState`, NOT in `[]RepoConfig` — prevents the provider from trying to build devcontainers for 100 repos.
+- Parallel cloning with semaphore (10-15 concurrent) — sequential would take 10+ min, parallel brings it to 30-90 sec.
+- Smudge filters MUST be disabled during clone (`GIT_CONFIG` env vars) — `.gitattributes` with `filter=` can execute arbitrary commands during checkout.
+- Ship `ripgrep` in investigation containers — 5-10x faster than `grep -r` for interactive use.
+- Filter archived repos by default — cuts clone count by ~65% for typical orgs.
+- Read-only filesystem mounts for shallow clones (user only needs search, not write).
+- Aggressive auto-destroy TTLs — investigation workspaces expose the full org codebase.
+- Progress model needs aggregate events ("Cloning 47/113..."), not per-repo events.
+
+**Prerequisites:** Org Catalog (done), multi-repo workspace groups (done).
+
 ## Idle Timeout Enforcement
 
 **Status:** Deferred

@@ -92,6 +92,23 @@ export interface CreateWorkspaceRequest {
   memory_mb?: number;
 }
 
+export interface OrgRepo {
+  name: string;
+  full_name: string;
+  default_branch: string;
+  description: string;
+  language: string;
+  archived: boolean;
+  private: boolean;
+  updated_at: string;
+  html_url: string;
+  clone_url: string;
+}
+
+export interface GitBranch {
+  name: string;
+}
+
 export interface SecretRef {
   name: string;
   placeholder: string;

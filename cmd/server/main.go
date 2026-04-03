@@ -20,6 +20,7 @@ import (
 	"github.com/nicobistolfi/cordon/internal/application/proxy"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/devcontainer"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/docker"
+	gh "github.com/nicobistolfi/cordon/internal/infrastructure/github"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/postgres"
 	"github.com/nicobistolfi/cordon/internal/infrastructure/sops"
 	ws "github.com/nicobistolfi/cordon/internal/infrastructure/websocket"
@@ -65,13 +66,16 @@ func main() {
 		vault.AddSecret(tenantID, "GITHUB_TOKEN", "cordon-placeholder-github-token", githubToken)
 	}
 
+	// GitHub API client (shared across provider + handlers)
+	ghClient := gh.NewClient(githubToken)
+
 	// Progress tracking
 	timingStore := progress.NewTimingStore("data/build-timings.json")
 	progressStore := progress.NewStore(timingStore)
 
 	// Workspace orchestrator (Docker)
 	var workspaceProvider *docker.Provider
-	workspaceProvider, err = docker.NewProvider(dcBuilder, githubToken)
+	workspaceProvider, err = docker.NewProvider(dcBuilder, githubToken, ghClient)
 	if err != nil {
 		log.Printf("WARNING: Docker not available, workspace features disabled: %v", err)
 	}
@@ -120,10 +124,7 @@ func main() {
 	workspaceHandler := handlers.NewWorkspaceHandler(workspaceProvider, progressStore)
 	secretHandler := handlers.NewSecretHandler(vault)
 
-	var githubHandler *handlers.GitHubHandler
-	if workspaceProvider != nil {
-		githubHandler = handlers.NewGitHubHandler(workspaceProvider.ResolveDefaultBranch)
-	}
+	githubHandler := handlers.NewGitHubHandler(ghClient)
 
 	// Router
 	mux := http.NewServeMux()
@@ -150,10 +151,10 @@ func main() {
 	mux.Handle("GET /api/secrets/", authMW(http.HandlerFunc(secretHandler.Reveal)))
 	mux.Handle("DELETE /api/secrets/", authMW(http.HandlerFunc(secretHandler.Delete)))
 
-	// GitHub API proxy
-	if githubHandler != nil {
-		mux.Handle("GET /api/github/default-branch", authMW(http.HandlerFunc(githubHandler.DefaultBranch)))
-	}
+	// GitHub API proxy (works without Docker — only needs GitHub token)
+	mux.Handle("GET /api/github/default-branch", authMW(http.HandlerFunc(githubHandler.DefaultBranch)))
+	mux.Handle("GET /api/github/orgs/{org}/repos", authMW(http.HandlerFunc(githubHandler.OrgRepos)))
+	mux.Handle("GET /api/github/repos/{owner}/{repo}/branches", authMW(http.HandlerFunc(githubHandler.RepoBranches)))
 
 	// Workspaces
 	mux.Handle("POST /api/workspaces", authMW(http.HandlerFunc(workspaceHandler.Create)))

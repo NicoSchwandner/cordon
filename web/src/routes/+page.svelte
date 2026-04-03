@@ -3,9 +3,10 @@
 	import DecisionBadge from '$lib/shared/components/DecisionBadge.svelte';
 	import TimeAgo from '$lib/shared/components/TimeAgo.svelte';
 	import StatusDot from '$lib/shared/components/StatusDot.svelte';
+	import RepoPicker from '$lib/shared/components/RepoPicker.svelte';
 	import { getContext } from 'svelte';
-	import { createWorkspace, getDefaultBranch } from '$lib/shared/api/client';
-	import type { WorkspaceResponse, RepoConfig } from '$lib/shared/api/types';
+	import { createWorkspace, listOrgRepos } from '$lib/shared/api/client';
+	import type { WorkspaceResponse, OrgRepo } from '$lib/shared/api/types';
 
 	const getHealthy = getContext<() => boolean | null>('healthy');
 	const healthy = $derived(getHealthy());
@@ -18,61 +19,63 @@
 	let extraWorkspaces: WorkspaceResponse[] = $state([]);
 	const workspaces = $derived([...extraWorkspaces, ...data.workspaces]);
 
-	// Multi-repo form state
-	interface RepoRow {
-		url: string;
-		branch: string;
-		detectedBranch: string;
+	// Org catalog state
+	let org = $state('');
+	let orgInput = $state('');
+	let orgRepos: OrgRepo[] = $state([]);
+	let orgLoading = $state(false);
+	let orgError = $state('');
+
+	// RepoPicker ref and rows state
+	let picker: RepoPicker | undefined = $state();
+	let repoRows = $state([makeEmptyRow()]);
+
+	function makeEmptyRow() {
+		return {
+			mode: 'org' as const,
+			selectedRepo: null,
+			repoSearch: '',
+			url: '',
+			branch: '',
+			detectedBranch: '',
+			branches: [] as import('$lib/shared/api/types').GitBranch[],
+			branchSearch: '',
+			showRepoDropdown: false,
+			showBranchDropdown: false,
+		};
 	}
 
-	let repos = $state<RepoRow[]>([{ url: '', branch: '', detectedBranch: '' }]);
-	let branchTimers: Map<number, ReturnType<typeof setTimeout>> = new Map();
-
-	function addRepo() {
-		repos.push({ url: '', branch: '', detectedBranch: '' });
-	}
-
-	function removeRepo(index: number) {
-		repos.splice(index, 1);
-		branchTimers.delete(index);
-	}
-
-	function detectBranch(index: number) {
-		const timer = branchTimers.get(index);
-		if (timer) clearTimeout(timer);
-
-		const url = repos[index].url.trim();
-		if (!url) {
-			repos[index].detectedBranch = '';
+	async function loadOrg() {
+		const target = orgInput.trim();
+		if (!target) {
+			org = '';
+			orgRepos = [];
 			return;
 		}
-
-		branchTimers.set(
-			index,
-			setTimeout(async () => {
-				try {
-					const result = await getDefaultBranch(url);
-					repos[index].detectedBranch = result.default_branch;
-				} catch {
-					repos[index].detectedBranch = '';
-				}
-			}, 500)
-		);
+		orgLoading = true;
+		orgError = '';
+		try {
+			orgRepos = await listOrgRepos(target);
+			org = target;
+		} catch (e) {
+			orgError = e instanceof Error ? e.message : 'Failed to load org';
+			orgRepos = [];
+			org = '';
+		}
+		orgLoading = false;
 	}
 
-	const hasRepos = $derived(repos.some((r) => r.url.trim().length > 0));
-	const primaryRepo = $derived(repos.find((r) => r.url.trim().length > 0));
+	function repoShortName(repo: string): string {
+		const parts = repo.replace(/\.git$/, '').split('/');
+		return parts[parts.length - 1] || '';
+	}
 
 	async function handleCreate() {
-		const repoConfigs: RepoConfig[] = repos
-			.filter((r) => r.url.trim().length > 0)
-			.map((r, i) => ({
-				url: r.url.trim(),
-				branch: r.branch.trim() || undefined,
-				primary: i === 0
-			}));
+		if (!picker) return;
+		const repoConfigs = picker.getRepoConfigs();
+		const primaryName = picker.getPrimaryName();
+		const name = newName.trim() || primaryName || 'workspace';
 
-		const name = newName.trim() || repoShortName(primaryRepo?.url || '') || 'workspace';
 		creating = true;
 		try {
 			const req: import('$lib/shared/api/types').CreateWorkspaceRequest = { name };
@@ -85,11 +88,6 @@
 			alert(e instanceof Error ? e.message : 'Failed to create workspace');
 		}
 		creating = false;
-	}
-
-	function repoShortName(repo: string): string {
-		const parts = repo.replace(/\.git$/, '').split('/');
-		return parts[parts.length - 1] || '';
 	}
 </script>
 
@@ -132,54 +130,52 @@
 				}}
 				class="mb-4 space-y-3 rounded-xl border border-border bg-surface p-4"
 			>
+				<!-- Org selector -->
+				<div>
+					<label for="org-input" class="mb-1 block text-xs font-medium text-foreground-muted">
+						GitHub Organization <span class="font-normal text-foreground-faint">(optional — enables repo picker)</span>
+					</label>
+					<div class="flex gap-2">
+						<input
+							id="org-input"
+							bind:value={orgInput}
+							placeholder="e.g. WintDev"
+							onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); loadOrg(); } }}
+							class="flex-1 rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+						/>
+						<button
+							type="button"
+							onclick={loadOrg}
+							disabled={orgLoading || !orgInput.trim()}
+							class="rounded-lg border border-border-input px-3 py-2 text-sm text-foreground-secondary transition-colors hover:bg-hover-subtle disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							{orgLoading ? 'Loading...' : org ? 'Reload' : 'Load'}
+						</button>
+					</div>
+					{#if orgError}
+						<p class="mt-1 text-xs text-danger-text">{orgError}</p>
+					{/if}
+					{#if org && orgRepos.length > 0}
+						<p class="mt-1 text-xs text-foreground-faint">
+							{orgRepos.filter(r => !r.archived).length} repos available
+							{#if orgRepos.some(r => r.archived)}
+								({orgRepos.filter(r => r.archived).length} archived hidden)
+							{/if}
+						</p>
+					{/if}
+				</div>
+
 				<!-- Repo rows -->
 				<div>
-					<div class="mb-1 flex items-center justify-between">
-						<label class="block text-xs font-medium text-foreground-muted">Repositories <span class="font-normal text-foreground-faint">(optional — leave empty for bare container)</span></label>
-					</div>
-					<div class="space-y-2">
-						{#each repos as repo, i}
-							<div class="flex items-start gap-2">
-								<div class="grid flex-1 gap-2 sm:grid-cols-2">
-									<div>
-										<input
-											bind:value={repo.url}
-											oninput={() => detectBranch(i)}
-											placeholder="e.g. github.com/WintDev/Core"
-											class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
-										/>
-										{#if i === 0 && repos.filter(r => r.url.trim()).length > 1}
-											<span class="mt-0.5 block text-xs text-foreground-faint">primary (devcontainer source)</span>
-										{/if}
-									</div>
-									<input
-										bind:value={repo.branch}
-										placeholder={repo.detectedBranch || 'branch (auto-detect)'}
-										class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
-									/>
-								</div>
-								{#if i > 0}
-									<button
-										type="button"
-										onclick={() => removeRepo(i)}
-										class="mt-2 text-foreground-faint transition-colors hover:text-danger-text"
-										title="Remove repo"
-									>
-										&times;
-									</button>
-								{:else}
-									<div class="w-4"></div>
-								{/if}
-							</div>
-						{/each}
-					</div>
-					<button
-						type="button"
-						onclick={addRepo}
-						class="mt-2 text-xs text-foreground-muted transition-colors hover:text-foreground"
-					>
-						+ Add another repo
-					</button>
+					<label class="mb-1 block text-xs font-medium text-foreground-muted">
+						Repositories <span class="font-normal text-foreground-faint">(optional — leave empty for bare container)</span>
+					</label>
+					<RepoPicker
+						bind:this={picker}
+						{org}
+						{orgRepos}
+						bind:rows={repoRows}
+					/>
 				</div>
 
 				<div>
@@ -187,11 +183,11 @@
 					<input
 						id="ws-name"
 						bind:value={newName}
-						placeholder={hasRepos ? repoShortName(primaryRepo?.url || '') || 'workspace' : 'workspace'}
+						placeholder={picker?.getPrimaryName() || 'workspace'}
 						class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
 					/>
 				</div>
-				{#if hasRepos}
+				{#if picker && picker.getRepoConfigs().length > 0}
 					<p class="text-xs text-foreground-faint">Building from devcontainer may take a few minutes on first run.</p>
 				{/if}
 				<div class="flex gap-2">

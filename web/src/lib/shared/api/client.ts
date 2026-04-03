@@ -2,7 +2,9 @@ import type {
   AuditEntry,
   AuditFilter,
   ApprovalDecisionRequest,
+  GitBranch,
   HTTPProxyRequest,
+  OrgRepo,
   ProblemDetails,
   ProgressEvent,
   ProxyResult,
@@ -130,6 +132,20 @@ export function getDefaultBranch(
   return fetchJSON(
     "GET",
     `/api/github/default-branch?repo=${encodeURIComponent(repo)}`,
+  );
+}
+
+export function listOrgRepos(org: string): Promise<OrgRepo[]> {
+  return fetchJSON("GET", `/api/github/orgs/${encodeURIComponent(org)}/repos`);
+}
+
+export function listRepoBranches(
+  owner: string,
+  repo: string,
+): Promise<GitBranch[]> {
+  return fetchJSON(
+    "GET",
+    `/api/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/branches`,
   );
 }
 
