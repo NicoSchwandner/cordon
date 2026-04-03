@@ -1,8 +1,15 @@
-node_modules/
-dist/
-*.tsbuildinfo
-.env
-~/.cordon/
+# Go
 server
+cordon-server
+*.exe
+
+# Frontend
+node_modules/
 web/.svelte-kit/
 web/build/
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.*

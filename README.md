@@ -1,55 +1,77 @@
 # Cordon
 
-Zero-trust developer environment. Secrets never touch your machine. Destructive operations require approval. Everything is audit-logged.
+Zero-trust developer environment. AI agents run in sandboxed workspaces where every operation is intercepted, classified, and audit-logged. Secrets never touch the workspace. Destructive operations require human approval.
 
-## Status
+## Architecture
 
-**Go backend + SvelteKit frontend** — all phases complete. Vertical slice working end-to-end.
+```mermaid
+graph TD
+    Agent["AI Agent<br/>(in workspace)"] -->|SQL query / HTTP request| Proxy["Cordon Proxy Pipeline"]
 
-| Phase                             | Status         |
-| --------------------------------- | -------------- |
-| 0. Project Bootstrap + Arch Tests | Done           |
-| 1. Tier Classification Engine     | Done           |
-| 2. Audit Store (PostgreSQL)       | Done           |
-| 3. Secret Swap                    | Done           |
-| 4. Proxy Pipeline                 | Done           |
-| 5. Approval Gate                  | Done           |
-| 6. API Server + Auth              | Done           |
-| 7. Workspace Orchestrator         | Done           |
-| 8. Terminal Relay (WebSocket)     | Done           |
-| 9. CLI (`cordon`)                 | Done           |
-| 10. Config Parser                 | Done           |
-| 11. E2E Tests                     | Done (7 tests) |
-| 12. SvelteKit Frontend            | Done           |
+    subgraph pipeline [Proxy Pipeline]
+        Egress["Egress Checker<br/>(allowlist)"]
+        Classify["Tier Classifier<br/>(T1-T4)"]
+        Approve["Approval Gate<br/>(T3 → human)"]
+        Swap["Secret Swap<br/>(placeholder → real)"]
+        Audit["Audit Logger<br/>(append-only)"]
+    end
+
+    Proxy --> Egress
+    Egress -->|blocked| Denied["403 Blocked"]
+    Egress -->|allowed| Classify
+    Classify -->|T4 forbidden| Denied
+    Classify -->|T3 destructive| Approve
+    Classify -->|T1-T2 safe| Swap
+    Approve -->|denied / timeout| Denied
+    Approve -->|approved| Swap
+    Swap --> Audit
+    Swap --> Target["Target Service"]
+    Audit --> DB[("PostgreSQL<br/>(append-only)")]
+
+    Human["Developer<br/>(browser / CLI)"] -->|approve / deny| Approve
+    Human -->|view| Dashboard["Web Dashboard"]
+    Dashboard --> Audit
+```
+
+## Operation Tiers
+
+| Tier | Policy           | Examples                                           |
+| ---- | ---------------- | -------------------------------------------------- |
+| 1    | Allow + log      | SELECT (with WHERE/LIMIT), HTTP GET, EXPLAIN, SHOW |
+| 2    | Allow + log      | INSERT, HTTP POST/PUT/PATCH                        |
+| 3    | Require approval | UPDATE, DELETE, DROP TABLE, unbounded SELECT       |
+| 4    | Always block     | DROP DATABASE, TRUNCATE, GRANT, REVOKE             |
 
 ## Quick Start
 
 ```bash
-# Start the backend (Postgres + migrations + server)
+# Full stack (Postgres + migrations + Go server)
 docker compose up -d --build
 
-# Start the frontend
+# Frontend
 cd web && npm install && npm run dev
 
-# Verify health
+# Verify
 curl http://localhost:8443/health
+```
 
+```bash
 # Tier 1 — allowed
 curl -s -X POST http://localhost:8443/api/proxy/sql \
   -H 'Content-Type: application/json' \
   -d '{"query":"SELECT * FROM users WHERE id = 1","caller":"my-agent"}'
 
-# Tier 4 — blocked (403)
+# Tier 4 — blocked
 curl -s -X POST http://localhost:8443/api/proxy/sql \
   -H 'Content-Type: application/json' \
   -d '{"query":"TRUNCATE TABLE users","caller":"my-agent"}'
 
-# Egress check
+# Egress — denied
 curl -s -X POST http://localhost:8443/api/proxy/http \
   -H 'Content-Type: application/json' \
   -d '{"method":"POST","host":"evil-exfil.com","url":"/steal","caller":"agent"}'
 
-# View audit log
+# Audit log
 curl -s http://localhost:8443/api/audit | jq .
 ```
 
@@ -64,63 +86,71 @@ cordon proxy http GET github.com  # HTTP proxy
 cordon audit show                 # Audit log (table or --json)
 cordon workspace create myws      # Create workspace
 cordon workspace list             # List workspaces
-cordon connect <workspace-id>     # Terminal relay (WebSocket)
+cordon connect <workspace-id>     # Terminal relay
 ```
 
-## Architecture
+## Project Structure
 
 ```
-Agent (in sandbox) --> Cordon API Server (port 8443) --> Target Service
-                            |
-                       Tier classifier (SQL keyword / HTTP method)
-                       Secret swap (placeholder --> real credential)
-                       Audit logger (append-only PostgreSQL)
-                       Approval gate (Tier 3 requires human approval)
-                       Egress checker (allowlist-based)
+cmd/
+  server/              API server entry point
+  cordon/              CLI entry point
+internal/
+  domain/              Pure types (Tier, AuditEntry, Workspace, etc.)
+  application/
+    ports/             Interfaces (TierClassifier, AuditStore, SecretVault)
+    proxy/             Pipeline: classify → egress → swap → audit
+    audit/             Audit query service
+  infrastructure/
+    postgres/          Audit store + testcontainers integration tests
+    docker/            Workspace orchestrator (devcontainer CLI)
+    sops/              Secret vault (in-memory, SOPS planned)
+    websocket/         Approval store with channel-based blocking
+    config/            .cordon.yaml parser
+  api/
+    handlers/          HTTP handlers
+    middleware/        Auth + RFC 7807 error handling
+    ws/                WebSocket (terminal relay, audit feed, approvals)
+web/                   SvelteKit frontend (Svelte 5, Tailwind v4, adapter-static)
+archtest/              AST-based architecture constraint tests
+e2e/                   End-to-end tests
+migrations/            PostgreSQL migrations
+docs/                  Spec, acceptance tests, UI audit screenshots
 ```
 
-### Clean Architecture Layers
+Architecture layer dependencies enforced by `archtest/layers_test.go`:
 
+```mermaid
+graph LR
+    domain --> application
+    application --> infrastructure
+    infrastructure --> api
+    style domain fill:#d4edda,stroke:#28a745
+    style application fill:#cce5ff,stroke:#007bff
+    style infrastructure fill:#fff3cd,stroke:#ffc107
+    style api fill:#f8d7da,stroke:#dc3545
 ```
-domain/           Pure types, no imports outside stdlib
-application/      Ports (interfaces) + use cases (proxy pipeline, audit service)
-infrastructure/   PostgreSQL, Docker, WebSocket, config parser
-api/              HTTP handlers, middleware, WebSocket handlers
-cmd/              Server + CLI entry points
-```
 
-Architecture constraints enforced by `archtest/layers_test.go` (AST-based).
-
-## Operation Tiers
-
-| Tier | Action                 | Examples                                           |
-| ---- | ---------------------- | -------------------------------------------------- |
-| 1    | Allow + log            | SELECT (with WHERE/LIMIT), HTTP GET, EXPLAIN, SHOW |
-| 2    | Allow + log            | INSERT, HTTP POST/PUT/PATCH                        |
-| 3    | Require approval + log | UPDATE, DELETE, DROP TABLE, unbounded SELECT       |
-| 4    | Always block + log     | DROP DATABASE, TRUNCATE, GRANT, REVOKE             |
+Each layer may only depend on layers to its **left**. Violations fail the build.
 
 ## Testing
 
 ```bash
-# Unit + arch tests
-go test ./... -short
-
-# E2E tests (requires Docker Compose stack running)
-go test ./e2e/... -tags=e2e -v
-
-# Integration tests with testcontainers (auto-starts Postgres)
-go test ./internal/infrastructure/postgres/... -v
+go test ./... -short                               # Unit + arch tests
+go test ./internal/infrastructure/postgres/... -v  # Integration (testcontainers)
+go test ./e2e/... -tags=e2e -v                     # E2E (needs docker compose)
+cd web && npx svelte-check                         # Frontend type checking
 ```
 
 ## Design Decisions
 
-| Decision       | Choice                  | Rationale                                                   |
-| -------------- | ----------------------- | ----------------------------------------------------------- |
-| DB access (v1) | HTTP-only (`POST /sql`) | Postgres wire protocol can't be intercepted by HTTP proxy   |
-| SQL parser     | Keyword-based           | Simple, sufficient for v1, upgradeable to vitess/sqlparser  |
-| Auth (v1)      | Static tenant ID        | Good enough for single-user; Ory Kratos integration planned |
-| Approval store | In-memory with channels | No persistence needed for v1; decisions are ephemeral       |
+| Decision       | Choice                  | Rationale                                                  |
+| -------------- | ----------------------- | ---------------------------------------------------------- |
+| DB access (v1) | HTTP-only (`POST /sql`) | Postgres wire protocol can't be intercepted by HTTP proxy  |
+| SQL parser     | Keyword-based           | Simple, sufficient for v1, upgradeable to vitess/sqlparser |
+| Auth (v1)      | Static tenant ID        | Single-user dev; Ory Kratos integration planned            |
+| Approval store | In-memory + channels    | Decisions are ephemeral; persistence not needed for v1     |
+| Frontend       | SvelteKit SPA           | adapter-static, Vite proxy to Go backend                   |
 
 ## License
 
