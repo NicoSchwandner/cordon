@@ -11,12 +11,12 @@ dev: dev-db ## Start full dev stack (postgres + Go server with hot reload + Vite
 		DATABASE_URL="postgres://postgres:postgres@localhost:5433/cordon?sslmode=disable" \
 		AUTH_MODE=static \
 		DEFAULT_TENANT_ID=00000000-0000-0000-0000-000000000001 \
-		air & \
+		go run github.com/air-verse/air@latest & \
 		cd web && npm install --silent && npm run dev & \
 		wait
 
 dev-db: ## Start only postgres + run migrations
-	@docker compose up -d postgres
+	@docker compose up -d --force-recreate postgres
 	@echo "Waiting for postgres..."
 	@until docker compose exec -T postgres pg_isready -U postgres >/dev/null 2>&1; do sleep 0.5; done
 	@docker compose up migrate --wait 2>/dev/null || true
@@ -26,7 +26,7 @@ dev-server: ## Start Go server with hot reload (assumes postgres running)
 	DATABASE_URL="postgres://postgres:postgres@localhost:5433/cordon?sslmode=disable" \
 	AUTH_MODE=static \
 	DEFAULT_TENANT_ID=00000000-0000-0000-0000-000000000001 \
-	air
+	go run github.com/air-verse/air@latest
 
 dev-web: ## Start Vite dev server with HMR (proxies to :8443)
 	cd web && npm install --silent && npm run dev
