@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,7 +44,8 @@ func NewProvider() (*Provider, error) {
 
 func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
 	wsID := uuid.New()
-	wsName := fmt.Sprintf("cordon-%s-%s", config.Name, wsID.String()[:8])
+	safeName := sanitizeContainerName(config.Name)
+	wsName := fmt.Sprintf("cordon-%s-%s", safeName, wsID.String()[:8])
 
 	log.Printf("[workspace] creating %s (tenant=%s)", wsName, tenantID.String()[:8])
 
@@ -272,6 +274,21 @@ func (p *Provider) Exec(ctx context.Context, tenantID, workspaceID uuid.UUID, cm
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+func sanitizeContainerName(name string) string {
+	var b []byte
+	for _, c := range []byte(strings.ToLower(name)) {
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' {
+			b = append(b, c)
+		} else if c == ' ' {
+			b = append(b, '-')
+		}
+	}
+	if len(b) == 0 {
+		return "workspace"
+	}
+	return string(b)
 }
 
 // ContainerID returns the Docker container ID for a workspace (for terminal relay).
