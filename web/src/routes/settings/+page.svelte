@@ -74,11 +74,6 @@
 		revealLoading = doneLoading;
 	}
 
-	function maskValue(value: string): string {
-		if (value.length <= 8) return '••••••••';
-		return value.slice(0, 4) + '•'.repeat(Math.min(value.length - 8, 16)) + value.slice(-4);
-	}
-
 	function startAdd() {
 		editingName = null;
 		formName = '';
@@ -317,11 +312,13 @@
 					{#each secrets as secret (secret.name)}
 						<div class="rounded-lg bg-surface-inset px-4 py-3">
 							<div class="flex items-center justify-between">
-								<span class="font-mono text-sm font-medium text-foreground">{secret.name}</span>
-								<div class="flex shrink-0 items-center gap-2">
+								<div class="flex items-center gap-2">
+									<span class="font-mono text-sm font-medium text-foreground">{secret.name}</span>
 									<span class="rounded-full bg-success-badge-bg px-2.5 py-1 text-xs font-medium text-success-text">
 										configured
 									</span>
+								</div>
+								<div class="flex shrink-0 items-center gap-1.5">
 									<button
 										onclick={() => startEdit(secret)}
 										class="rounded-md px-2 py-1 text-xs text-foreground-muted transition-colors hover:bg-hover-subtle hover:text-foreground"
@@ -336,36 +333,41 @@
 									</button>
 								</div>
 							</div>
-							<div class="mt-2 flex items-center gap-3">
-								<div class="flex min-w-0 items-center gap-1.5">
-									<span class="text-xs text-foreground-faint">placeholder:</span>
-									<code class="truncate font-mono text-xs text-foreground-secondary">{secret.placeholder}</code>
+							<div class="mt-2 flex flex-col gap-1.5 text-xs">
+								<div class="flex items-center gap-1.5">
+									<span class="w-16 shrink-0 text-foreground-faint">placeholder</span>
+									<code class="font-mono text-foreground-secondary">{secret.placeholder}</code>
 									<button
 										onclick={() => copyPlaceholder(secret.placeholder, secret.name)}
-										class="shrink-0 rounded px-1.5 py-0.5 text-xs text-foreground-faint transition-colors hover:bg-hover-subtle hover:text-foreground-muted"
+										class="shrink-0 rounded p-0.5 text-foreground-faint transition-colors hover:text-foreground-muted"
 										title="Copy placeholder"
 									>
-										{copiedName === secret.name ? 'copied!' : 'copy'}
+										{#if copiedName === secret.name}
+											<!-- check icon -->
+											<svg class="h-3.5 w-3.5 text-success-text" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7"/></svg>
+										{:else}
+											<!-- copy icon -->
+											<svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="5" width="8" height="8" rx="1.5"/><path d="M3 11V3.5A1.5 1.5 0 014.5 2H11"/></svg>
+										{/if}
 									</button>
 								</div>
-								<span class="text-foreground-faint">|</span>
 								<div class="flex items-center gap-1.5">
-									<span class="text-xs text-foreground-faint">value:</span>
+									<span class="w-16 shrink-0 text-foreground-faint">value</span>
 									{#if revealLoading.has(secret.name)}
-										<span class="text-xs text-foreground-muted">loading...</span>
+										<span class="text-foreground-muted">loading...</span>
 									{:else if secret.name in revealedValues}
-										<code class="font-mono text-xs text-foreground-secondary">{maskValue(revealedValues[secret.name])}</code>
+										<code class="font-mono text-foreground-secondary">{revealedValues[secret.name]}</code>
 										<button
 											onclick={() => toggleRevealValue(secret.name)}
-											class="shrink-0 rounded px-1.5 py-0.5 text-xs text-foreground-faint transition-colors hover:bg-hover-subtle hover:text-foreground-muted"
+											class="shrink-0 rounded px-1.5 py-0.5 text-foreground-faint transition-colors hover:bg-hover-subtle hover:text-foreground-muted"
 										>
 											hide
 										</button>
 									{:else}
-										<span class="font-mono text-xs text-foreground-faint">••••••••</span>
+										<code class="font-mono text-foreground-muted">{secret.masked_value || '••••••••'}</code>
 										<button
 											onclick={() => toggleRevealValue(secret.name)}
-											class="shrink-0 rounded px-1.5 py-0.5 text-xs text-foreground-faint transition-colors hover:bg-hover-subtle hover:text-foreground-muted"
+											class="shrink-0 rounded px-1.5 py-0.5 text-foreground-faint transition-colors hover:bg-hover-subtle hover:text-foreground-muted"
 										>
 											reveal
 										</button>

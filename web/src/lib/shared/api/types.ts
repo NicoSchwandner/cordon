@@ -82,6 +82,7 @@ export interface CreateWorkspaceRequest {
 export interface SecretRef {
   name: string;
   placeholder: string;
+  masked_value: string;
 }
 
 export interface SetSecretRequest {

@@ -21,6 +21,7 @@ func NewSecretHandler(vault ports.SecretVault) *SecretHandler {
 type SecretRefResponse struct {
 	Name        string `json:"name"`
 	Placeholder string `json:"placeholder"`
+	MaskedValue string `json:"masked_value"`
 }
 
 type SetSecretRequest struct {
@@ -42,7 +43,11 @@ func (h *SecretHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]SecretRefResponse, len(refs))
 	for i, ref := range refs {
-		resp[i] = SecretRefResponse{Name: ref.Name, Placeholder: ref.Placeholder}
+		masked := ""
+		if val, err := h.vault.RevealValue(r.Context(), tenantID, ref.Name); err == nil {
+			masked = maskSecret(val)
+		}
+		resp[i] = SecretRefResponse{Name: ref.Name, Placeholder: ref.Placeholder, MaskedValue: masked}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -79,7 +84,14 @@ func (h *SecretHandler) Set(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(SecretRefResponse{Name: req.Name, Placeholder: req.Placeholder})
+	json.NewEncoder(w).Encode(SecretRefResponse{Name: req.Name, Placeholder: req.Placeholder, MaskedValue: maskSecret(req.Value)})
+}
+
+func maskSecret(value string) string {
+	if len(value) <= 8 {
+		return strings.Repeat("•", len(value))
+	}
+	return value[:4] + strings.Repeat("•", min(len(value)-8, 16)) + value[len(value)-4:]
 }
 
 func (h *SecretHandler) Reveal(w http.ResponseWriter, r *http.Request) {
