@@ -78,16 +78,26 @@ export function connectApprovalsWS(
 export interface TerminalWS {
   send: (data: string) => void;
   resize: (cols: number, rows: number) => void;
-  onData: (cb: (data: string) => void) => void;
+  onData: (cb: (data: string | Uint8Array) => void) => void;
   close: () => void;
 }
 
 export function connectTerminalWS(workspaceId: string): TerminalWS {
   const url = wsUrl(`/ws/terminal/${workspaceId}`);
   const ws = new WebSocket(url);
-  let dataCb: ((data: string) => void) | null = null;
+  ws.binaryType = "arraybuffer";
+  let dataCb: ((data: string | Uint8Array) => void) | null = null;
+  const pending: (string | Uint8Array)[] = [];
 
-  ws.onmessage = (ev) => dataCb?.(ev.data);
+  ws.onmessage = (ev) => {
+    const chunk =
+      ev.data instanceof ArrayBuffer ? new Uint8Array(ev.data) : ev.data;
+    if (dataCb) {
+      dataCb(chunk);
+    } else {
+      pending.push(chunk);
+    }
+  };
 
   return {
     send: (data: string) => {
@@ -100,6 +110,8 @@ export function connectTerminalWS(workspaceId: string): TerminalWS {
     },
     onData: (cb) => {
       dataCb = cb;
+      for (const chunk of pending) cb(chunk);
+      pending.length = 0;
     },
     close: () => ws.close(),
   };
