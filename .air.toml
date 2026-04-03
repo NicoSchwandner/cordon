@@ -17,6 +17,10 @@ tmp_dir = "tmp"
 
 [log]
   time = false
+  main_only = false
+
+[screen]
+  clear_on_rebuild = false
 
 [misc]
   clean_on_exit = true

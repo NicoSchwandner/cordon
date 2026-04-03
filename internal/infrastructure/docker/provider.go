@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"sync"
 	"time"
 
@@ -42,7 +43,9 @@ func NewProvider() (*Provider, error) {
 
 func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain.WorkspaceConfig) (domain.Workspace, error) {
 	wsID := uuid.New()
-	wsName := fmt.Sprintf("zt-%s-%s", tenantID.String()[:8], wsID.String()[:8])
+	wsName := fmt.Sprintf("cordon-%s-%s", config.Name, wsID.String()[:8])
+
+	log.Printf("[workspace] creating %s (tenant=%s)", wsName, tenantID.String()[:8])
 
 	// Create a dedicated network for the workspace
 	networkResp, err := p.client.NetworkCreate(ctx, wsName+"-net", network.CreateOptions{
@@ -62,11 +65,15 @@ func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain
 		image = "mcr.microsoft.com/devcontainers/base:ubuntu" // TODO: build from devcontainer.json
 	}
 
-	// Pull image if needed (best-effort)
+	// Pull image if not already available
+	log.Printf("[workspace] ensuring image %s is available...", image)
 	reader, err := p.client.ImagePull(ctx, image, dockerimage.PullOptions{})
 	if err == nil {
 		io.Copy(io.Discard, reader)
 		reader.Close()
+		log.Printf("[workspace] image ready")
+	} else {
+		log.Printf("[workspace] image pull failed (may already exist locally): %v", err)
 	}
 
 	// Create workspace container
@@ -104,17 +111,19 @@ func (p *Provider) Create(ctx context.Context, tenantID uuid.UUID, config domain
 		return domain.Workspace{}, fmt.Errorf("creating container: %w", err)
 	}
 
+	log.Printf("[workspace] starting container %s", resp.ID[:12])
 	if err := p.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
 		p.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		p.client.NetworkRemove(ctx, networkResp.ID)
 		return domain.Workspace{}, fmt.Errorf("starting container: %w", err)
 	}
+	log.Printf("[workspace] %s is running (container=%s)", wsName, resp.ID[:12])
 
 	now := time.Now().UTC()
 	ws := domain.Workspace{
 		ID:        wsID,
 		TenantID:  tenantID,
-		Name:      wsName,
+		Name:      config.Name,
 		Status:    domain.WorkspaceRunning,
 		CreatedAt: now,
 		ExpiresAt: now.Add(config.MaxLifetime),
@@ -212,11 +221,17 @@ func (p *Provider) Destroy(ctx context.Context, tenantID, workspaceID uuid.UUID)
 	p.mu.Unlock()
 
 	// Remove container (force kill)
-	p.client.ContainerRemove(ctx, state.containerID, container.RemoveOptions{Force: true})
+	log.Printf("[workspace] destroying %s (container=%s)", state.workspace.Name, state.containerID[:12])
+	if err := p.client.ContainerRemove(ctx, state.containerID, container.RemoveOptions{Force: true}); err != nil {
+		log.Printf("[workspace] warning: container remove failed: %v", err)
+	}
 
 	// Remove network
-	p.client.NetworkRemove(ctx, state.networkID)
+	if err := p.client.NetworkRemove(ctx, state.networkID); err != nil {
+		log.Printf("[workspace] warning: network remove failed: %v", err)
+	}
 
+	log.Printf("[workspace] destroyed %s", state.workspace.Name)
 	return nil
 }
 

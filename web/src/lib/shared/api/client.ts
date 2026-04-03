@@ -40,6 +40,9 @@ async function fetchJSON<T>(
   if (!resp.ok) {
     throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
   }
+  if (resp.status === 204 || resp.headers.get("content-length") === "0") {
+    return undefined as T;
+  }
   return resp.json();
 }
 

@@ -65,7 +65,12 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tenantID := middleware.TenantIDFromContext(r.Context())
+	name := req.Name
+	if name == "" {
+		name = "workspace"
+	}
 	config := domain.WorkspaceConfig{
+		Name:             name,
 		DevcontainerPath: req.DevcontainerPath,
 		CPU:              max(req.CPU, 1),
 		MemoryMB:         max(req.MemoryMB, 512),

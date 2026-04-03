@@ -27,6 +27,7 @@ type Workspace struct {
 }
 
 type WorkspaceConfig struct {
+	Name             string
 	DevcontainerPath string
 	CPU              int
 	MemoryMB         int

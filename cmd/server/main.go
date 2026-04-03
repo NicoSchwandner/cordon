@@ -143,7 +143,7 @@ func main() {
 	mux.Handle("/ws/approvals", authMW(apiws.NewApprovalWSHandler()))
 	mux.Handle("/ws/audit", authMW(apiws.NewAuditWSHandler()))
 
-	handler := middleware.Recovery(mux)
+	handler := middleware.Logger(middleware.Recovery(mux))
 
 	server := &http.Server{
 		Addr:         ":" + port,
