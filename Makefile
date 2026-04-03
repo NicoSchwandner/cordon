@@ -1,5 +1,11 @@
 .PHONY: dev dev-db dev-server dev-web stop build test test-integration test-e2e check lint clean install-tools help
 
+# Load .env if it exists (GITHUB_TOKEN, etc.)
+ifneq (,$(wildcard .env))
+include .env
+export
+endif
+
 # — Development ——————————————————————————————————————————————
 
 dev: dev-db ## Start full dev stack (postgres + Go server with hot reload + Vite HMR)
