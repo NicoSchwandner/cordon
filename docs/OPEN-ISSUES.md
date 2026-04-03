@@ -2,6 +2,66 @@
 
 Documented design decisions that are deferred past the current MVP. Each item includes context on why it was deferred and what the expected approach is.
 
+---
+
+## Near-Term Improvements
+
+### Provider Test Coverage
+
+**Status:** Needed
+**Impact:** No tests for `createFromRepo`, clone fallback, git identity setup
+
+The devcontainer provisioning flow (clone, fallback branch creation, git credential/identity setup) has no unit or integration tests. The devcontainer config parser has tests, but the Docker provider's new logic is untested.
+
+**Planned approach:** Integration tests using testcontainers. Mock the devcontainer CLI build step, test the clone/fallback/git-config logic against a real Docker daemon.
+
+### Creation Progress Feedback
+
+**Status:** Needed
+**Impact:** UX — the POST blocks for 1-4 minutes with zero feedback
+
+Creating a workspace from a repo is synchronous. The frontend shows "Creating..." but has no visibility into what's happening (cloning, building image, running postCreateCommand). Users don't know if it's stuck or working.
+
+**Planned approach:** Stream build logs to the frontend during creation. Options: SSE endpoint, or WebSocket that streams logs while the POST runs in the background. See also "Async Workspace Creation with Progress" below for the full async solution.
+
+### Image Caching
+
+**Status:** Needed
+**Impact:** Repeated creates from the same repo rebuild the devcontainer image every time
+
+Docker layer caching helps, but the full `devcontainer build` cycle still runs (clone to tmpdir, invoke CLI, etc.) even when nothing changed. First build is ~1-4 min, subsequent builds ~15-30s due to layer cache, but this could be near-instant.
+
+**Planned approach:** Cache built images by `repo:branch:devcontainer-hash`. Before building, check if a cached image exists and the devcontainer.json hasn't changed. Skip the build entirely if cache is valid. Invalidation: on push to branch (webhook) or TTL-based.
+
+### Default Branch Detection
+
+**Status:** Needed
+**Impact:** Base branch defaults to "development" which is Wint-specific
+
+When base branch is left empty, the system defaults to "development". Other companies use "main", "master", or custom default branches.
+
+**Planned approach:** Query GitHub API (`GET /repos/{owner}/{repo}`) to read the `default_branch` field. Cache per-repo. Fall back to "main" if the API call fails.
+
+### AI Agent Configuration Parity
+
+**Status:** Needed
+**Impact:** Developers using Claude Code in workspaces don't get their local AI configuration
+
+Developers have local Claude Code setups — skills, rules, instructions, hooks, CLAUDE.md files — that define how their AI assistant behaves. When they create a Cordon workspace, none of this configuration carries over. The remote Claude instance inside the workspace is a blank slate.
+
+**Planned approach:** Multi-layered config injection at workspace creation:
+
+1. **Repo-level config** — the repo's committed `.claude/` folder (CLAUDE.md, rules, settings) is already present after clone. This works today.
+2. **Org-level config** — shared rules/instructions from a central repo (e.g., `Wint.AI.Rules`). Could be cloned as a sidecar or mounted into the workspace, with a sync step in postCreateCommand.
+3. **User-level config** — personal preferences, API tokens, custom skills. Stored in Cordon's user settings (future auth system) and injected into `~/.claude/` inside the container at creation time.
+4. **Secrets** — API tokens for Claude, MCP servers, etc. Injected via the existing secret vault / proxy mechanism. Real tokens never stored in the workspace.
+
+The goal: a developer creates a workspace and Claude Code works identically to their local setup — same rules, same skills, same behavior. The workspace should feel like "my machine, but ephemeral."
+
+---
+
+## Deferred (Post-MVP)
+
 ## Async Workspace Creation with Progress
 
 **Status:** Deferred
