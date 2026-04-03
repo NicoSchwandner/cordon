@@ -109,6 +109,80 @@ Currently, every workspace creation runs `devcontainer build` from scratch. The 
 
 **Planned approach:** Cache built images by `repo:branch:devcontainer-hash`. On workspace create, check if a cached image exists and is still valid (devcontainer.json hasn't changed). If valid, skip the build. Invalidation: webhook on push to branch, or TTL-based.
 
+## MCP Proxy Support
+
+**Status:** Deferred
+**Impact:** Critical — MCP tools (database access, etc.) don't go through the zero-trust pipeline
+
+MCP tools are the primary way AI agents interact with databases and external services. Currently, MCP calls bypass Cordon entirely — there's no interception, classification, or credential swapping for MCP tool invocations.
+
+**Planned approach:** An MCP proxy mode where Cordon acts as an MCP server that wraps real MCP servers. Agent calls MCP tool → Cordon intercepts → classifies the underlying operation (SQL tier, HTTP tier) → swaps credentials → forwards to actual MCP server → audits → returns result. The agent's MCP config points at Cordon, not the real servers.
+
+This is the linchpin for database investigation workflows — developers keep the same DX (MCP tools work identically) while every query goes through tier classification, approval gates, and audit logging.
+
+## HTTP Proxy Forwarding
+
+**Status:** Deferred
+**Impact:** Security — proxy classifies requests but doesn't make the actual outbound call
+
+The current HTTP proxy classifies, swaps secrets, and returns the modified request — but the agent must make the actual outbound HTTP call itself. This means the workspace still needs direct network access to target services, undermining the zero-trust boundary.
+
+**Planned approach:** The proxy should be a true forward proxy: receive the request, classify it, swap secrets, make the outbound call on behalf of the agent, and return the response. The workspace has no direct internet access — all HTTP goes through the proxy.
+
+## Network-Level Egress Enforcement
+
+**Status:** Deferred
+**Impact:** Security — egress allowlist is app-level only, bypassable
+
+The current egress control is enforced at the application level (Go proxy checks an allowlist). A compromised agent that bypasses the proxy (e.g., raw socket, curl to a different port) can reach any host.
+
+**Planned approach:** iptables/nftables rules on the workspace container's network that only allow traffic to the Cordon proxy. All outbound connections from the workspace must go through the proxy — enforced at the network layer, not just the application layer. Options: custom Docker network with iptables rules, or Envoy sidecar with strict egress policy.
+
+## Real Authentication (OIDC / Entra ID)
+
+**Status:** Deferred
+**Impact:** Security — anyone who can reach port 8443 can use the system
+
+Currently single-tenant with a static tenant ID. No user authentication, no identity provider integration.
+
+**Planned approach:** OIDC integration with Entra ID (Azure AD) as the primary provider. Device-bound tokens, short TTLs, Conditional Access policies. Each developer gets their own tenant context. Supports the user settings system needed for AI config parity and git identity preferences.
+
+## Vault Integration (Azure Key Vault / Managed Identity)
+
+**Status:** Deferred
+**Impact:** Security — secrets stored in env vars on the Cordon server
+
+The secret vault is currently in-memory, loaded from environment variables. Secrets exist in plaintext on the server's process.
+
+**Planned approach:** Integration with Azure Key Vault using Managed Identity. The Cordon server fetches secrets from Key Vault at runtime — no secrets in env vars, config files, or on disk. Supports automatic rotation. For non-Azure deployments, HashiCorp Vault as an alternative backend.
+
+## SQL Classifier Improvements
+
+**Status:** Deferred
+**Impact:** Security — keyword-based classification can't detect subtle threats
+
+The SQL tier classifier uses keyword matching (SELECT = T1, INSERT = T2, DELETE = T3, DROP = T4). It can't detect: SELECT \* returning millions of rows, SQL injection in agent-constructed queries, data exfiltration via benign-looking queries, or queries that combine safe keywords into dangerous operations.
+
+**Planned approach:** Query parsing (not just keyword matching) to understand query structure. Result set limits (row caps). Parameterized query enforcement. Integration with database-level audit logs to correlate proxy classification with actual query impact.
+
+## Query Result Filtering / PII Masking
+
+**Status:** Deferred
+**Impact:** Privacy — query results may contain PII that agents don't need
+
+Even when a query is allowed, the result set may contain sensitive data (emails, SSNs, financial data) that the agent doesn't need for its task.
+
+**Planned approach:** Configurable column-level masking rules. Specific columns (email, phone, SSN) are masked or redacted in query results before they reach the agent. Rule sets defined per-database or per-table in `.cordon.yaml`.
+
+## Persistent Approval Grants
+
+**Status:** Deferred
+**Impact:** UX — approval grants (session/pattern-based) are lost on server restart
+
+When a user approves a T3 operation with "session" or "pattern" scope, that grant is stored in memory and lost on restart. The developer has to re-approve the same operations after every server restart.
+
+**Planned approach:** Persist grants to PostgreSQL alongside audit entries. Grants have TTLs and are scoped to tenant + workspace. Expired grants are cleaned up automatically.
+
 ## Idle Timeout Enforcement
 
 **Status:** Deferred
