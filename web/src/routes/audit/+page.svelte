@@ -8,13 +8,18 @@
 
 	let { data } = $props();
 
+	let mode = $state<'initial' | 'live' | 'filtered'>('initial');
 	let liveEntries: AuditEntry[] = $state([]);
 	let fetchedEntries: AuditEntry[] = $state([]);
-	let useServerData = $state(true);
-	const entries = $derived([...liveEntries, ...(useServerData ? data.entries : fetchedEntries)]);
-	let liveEnabled = $state(false);
 	let cleanupWS: (() => void) | null = $state(null);
 	let loading = $state(false);
+
+	const liveEnabled = $derived(mode === 'live');
+	const entries = $derived(
+		mode === 'filtered'
+			? fetchedEntries
+			: [...liveEntries, ...(fetchedEntries.length > 0 ? fetchedEntries : data.entries)]
+	);
 
 	// Filters
 	let tierFilter = $state('');
@@ -33,12 +38,15 @@
 		if (liveEnabled && cleanupWS) {
 			cleanupWS();
 			cleanupWS = null;
-			liveEnabled = false;
+			mode = 'initial';
 		} else {
+			liveEntries = [];
 			cleanupWS = connectAuditWS((entry) => {
-				liveEntries = [entry, ...liveEntries];
+				if (!liveEntries.some(e => e.id === entry.id)) {
+					liveEntries = [entry, ...liveEntries];
+				}
 			});
-			liveEnabled = true;
+			mode = 'live';
 		}
 	}
 
@@ -46,10 +54,13 @@
 		loading = true;
 		try {
 			const more = await getAuditEntries({ limit: 50, offset: entries.length });
-			useServerData = false;
-			fetchedEntries = [...fetchedEntries, ...data.entries, ...more];
-		} catch {
-			/* ignore */
+			if (fetchedEntries.length === 0) {
+				fetchedEntries = [...data.entries, ...more];
+			} else {
+				fetchedEntries = [...fetchedEntries, ...more];
+			}
+		} catch (e) {
+			console.warn('loadMore failed:', e);
 		}
 		loading = false;
 	}
@@ -60,11 +71,11 @@
 			const params: Record<string, unknown> = { limit: 50 };
 			if (tierFilter) params.tier_min = Number(tierFilter);
 			if (decisionFilter) params.decision = decisionFilter;
-			useServerData = false;
 			liveEntries = [];
 			fetchedEntries = await getAuditEntries(params);
-		} catch {
-			/* ignore */
+			mode = 'filtered';
+		} catch (e) {
+			console.warn('applyFilters failed:', e);
 		}
 		loading = false;
 	}

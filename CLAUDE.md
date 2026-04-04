@@ -45,11 +45,13 @@ docs/                Spec, acceptance tests, UI audit screenshots
 
 ## Architecture Rules
 
-Enforced by `archtest/layers_test.go`:
+Enforced by `archtest/`:
 
 - `domain` must not import `application`, `infrastructure`, or `api`
 - `application` must not import `infrastructure` or `api`
 - `infrastructure` must not import `api`
+- No `.go` file may exceed 750 lines (split methods across files in the same package)
+- No function may exceed 350 lines (extract phases into well-named helpers)
 
 ## Key Patterns
 
@@ -58,6 +60,19 @@ Enforced by `archtest/layers_test.go`:
 - **Error responses**: RFC 7807 ProblemDetails (`application/problem+json`), type URLs at `cordon.dev/problems/`.
 - **Auth**: Pluggable via `AuthValidator` interface. Static mode (single tenant) for dev, token mode for multi-tenant.
 - **Frontend**: SvelteKit 5 with Svelte 5 runes, Tailwind v4, `@theme` semantic tokens, adapter-static (SPA).
+
+## Code Quality Guidelines
+
+### Go Backend
+
+- **No duplication**: If you write the same pattern 3+ times, extract a helper. Check for existing helpers first (e.g., `extractWorkspaceID` in handlers).
+- **Split large files**: Go treats all files in a package as one unit — split methods across files by concern (e.g., `container.go`, `exec.go`, `workspace_ops.go`).
+
+### Frontend
+
+- **Error handling**: Never use `alert()`. Use the `<MessageBanner>` component with `$state` error variables. Run `make lint-web` to verify.
+- **Catch blocks**: Always log errors with `console.warn()` unless the catch is intentionally silent (add `// intentional` comment explaining why).
+- **State management**: Use explicit union types (e.g., `$state<'initial' | 'live' | 'filtered'>('initial')`) instead of boolean flags when a component has 3+ states. Clear state on mode transitions.
 
 ## Environment Variables
 

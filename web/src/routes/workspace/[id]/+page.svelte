@@ -2,6 +2,7 @@
 	import StatusDot from '$lib/shared/components/StatusDot.svelte';
 	import CreationProgress from '$lib/shared/components/CreationProgress.svelte';
 	import AgentPanel from '$lib/security/AgentPanel.svelte';
+	import MessageBanner from '$lib/shared/components/MessageBanner.svelte';
 	import { workspaceAction, deleteWorkspace, getWorkspace, activateRepos, connectCreationSSE } from '$lib/shared/api/client';
 	import type { WorkspaceResponse } from '$lib/shared/api/types';
 	import { connectTerminalWS } from '$lib/shared/api/websocket';
@@ -21,6 +22,7 @@
 	let repoFilter = $state('');
 	let activatingRepo = $state('');
 	let activationProgress = $state('');
+	let actionError = $state('');
 	const filteredShallowRepos = $derived(() => {
 		if (!investigation?.shallow_repos) return [];
 		const q = repoFilter.toLowerCase();
@@ -56,7 +58,7 @@
 				}
 			});
 		} catch (e) {
-			alert(e instanceof Error ? e.message : 'Activation failed');
+			actionError = e instanceof Error ? e.message : 'Activation failed';
 			activatingRepo = '';
 			activationProgress = '';
 		}
@@ -90,21 +92,23 @@
 	});
 
 	async function handleAction(action: 'suspend' | 'resume') {
+		actionError = '';
 		try {
 			await workspaceAction(data.workspaceId, action);
 			window.location.reload();
 		} catch (e) {
-			alert(e instanceof Error ? e.message : 'Action failed');
+			actionError = e instanceof Error ? e.message : 'Action failed';
 		}
 	}
 
 	async function handleDelete() {
 		if (!confirm('Destroy this workspace? This cannot be undone.')) return;
+		actionError = '';
 		try {
 			await deleteWorkspace(data.workspaceId);
 			window.location.href = '/';
 		} catch (e) {
-			alert(e instanceof Error ? e.message : 'Delete failed');
+			actionError = e instanceof Error ? e.message : 'Delete failed';
 		}
 	}
 </script>
@@ -160,6 +164,8 @@
 			>Destroy</button>
 		</div>
 	</div>
+
+	<MessageBanner bind:message={actionError} />
 
 	<!-- Main content: Progress or Terminal + Agent Panel -->
 	{#if isCreating}

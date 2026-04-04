@@ -47,50 +47,16 @@ func (s *SecretSwapper) Swap(ctx context.Context, tenantID uuid.UUID, req *Proxy
 		modified.Headers[k] = v
 	}
 
-	// Replace in body
-	bodyStr := string(req.Body)
-	for placeholder, real := range replacements {
-		if strings.Contains(bodyStr, placeholder) {
-			bodyStr = strings.ReplaceAll(bodyStr, placeholder, real)
-			swapped = append(swapped, placeholderToName(refs, placeholder))
-		}
-	}
-	modified.Body = []byte(bodyStr)
-
-	// Replace in SQL query
-	sqlStr := req.SQLQuery
-	for placeholder, real := range replacements {
-		if strings.Contains(sqlStr, placeholder) {
-			sqlStr = strings.ReplaceAll(sqlStr, placeholder, real)
-			if !contains(swapped, placeholderToName(refs, placeholder)) {
-				swapped = append(swapped, placeholderToName(refs, placeholder))
-			}
-		}
-	}
-	modified.SQLQuery = sqlStr
-
-	// Replace in path
-	pathStr := req.Path
-	for placeholder, real := range replacements {
-		if strings.Contains(pathStr, placeholder) {
-			pathStr = strings.ReplaceAll(pathStr, placeholder, real)
-			if !contains(swapped, placeholderToName(refs, placeholder)) {
-				swapped = append(swapped, placeholderToName(refs, placeholder))
-			}
-		}
-	}
-	modified.Path = pathStr
-
-	// Replace in headers
+	seen := make(map[string]bool)
+	modified.Body = []byte(replaceSecrets(string(req.Body), replacements, refs, seen))
+	modified.SQLQuery = replaceSecrets(req.SQLQuery, replacements, refs, seen)
+	modified.Path = replaceSecrets(req.Path, replacements, refs, seen)
 	for k, v := range modified.Headers {
-		for placeholder, real := range replacements {
-			if strings.Contains(v, placeholder) {
-				modified.Headers[k] = strings.ReplaceAll(v, placeholder, real)
-				if !contains(swapped, placeholderToName(refs, placeholder)) {
-					swapped = append(swapped, placeholderToName(refs, placeholder))
-				}
-			}
-		}
+		modified.Headers[k] = replaceSecrets(v, replacements, refs, seen)
+	}
+
+	for name := range seen {
+		swapped = append(swapped, name)
 	}
 
 	return &modified, swapped, nil
@@ -121,11 +87,12 @@ func placeholderToName(refs []domain.SecretRef, placeholder string) string {
 	return placeholder
 }
 
-func contains(slice []string, item string) bool {
-	for _, s := range slice {
-		if s == item {
-			return true
+func replaceSecrets(s string, replacements map[string]string, refs []domain.SecretRef, seen map[string]bool) string {
+	for placeholder, real := range replacements {
+		if strings.Contains(s, placeholder) {
+			s = strings.ReplaceAll(s, placeholder, real)
+			seen[placeholderToName(refs, placeholder)] = true
 		}
 	}
-	return false
+	return s
 }

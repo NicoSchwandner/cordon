@@ -4,6 +4,7 @@
 	import TimeAgo from '$lib/shared/components/TimeAgo.svelte';
 	import StatusDot from '$lib/shared/components/StatusDot.svelte';
 	import RepoPicker from '$lib/shared/components/RepoPicker.svelte';
+	import MessageBanner from '$lib/shared/components/MessageBanner.svelte';
 	import { getContext } from 'svelte';
 	import { createWorkspace, listOrgRepos } from '$lib/shared/api/client';
 	import type { WorkspaceResponse, OrgRepo } from '$lib/shared/api/types';
@@ -18,6 +19,7 @@
 	let creating = $state(false);
 	let wsMode: 'dev' | 'investigation' = $state('dev');
 	let extraWorkspaces: WorkspaceResponse[] = $state([]);
+	let createError = $state('');
 	const workspaces = $derived([...extraWorkspaces, ...data.workspaces]);
 
 	// Org catalog state
@@ -75,9 +77,10 @@
 	async function handleCreate() {
 		creating = true;
 		try {
+			createError = '';
 			if (wsMode === 'investigation') {
 				if (!org) {
-					alert('Load a GitHub organization first');
+					createError = 'Load a GitHub organization first';
 					creating = false;
 					return;
 				}
@@ -97,7 +100,7 @@
 				window.location.href = `/workspace/${ws.id}`;
 			}
 		} catch (e) {
-			alert(e instanceof Error ? e.message : 'Failed to create workspace');
+			createError = e instanceof Error ? e.message : 'Failed to create workspace';
 		}
 		creating = false;
 	}
@@ -227,6 +230,7 @@
 				{:else if picker && picker.getRepoConfigs().length > 0}
 					<p class="text-xs text-foreground-faint">Building from devcontainer may take a few minutes on first run.</p>
 				{/if}
+				<MessageBanner bind:message={createError} />
 				<div class="flex gap-2">
 					<button
 						type="submit"

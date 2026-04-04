@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { SecretRef } from '$lib/shared/api/types';
 	import { listSecrets, setSecret, updateSecret, deleteSecret, revealSecret } from '$lib/shared/api/client';
+	import MessageBanner from '$lib/shared/components/MessageBanner.svelte';
 
 	let activeTab: 'egress' | 'overrides' | 'secrets' = $state('egress');
 
@@ -32,6 +33,7 @@
 	let formValue = $state('');
 	let formError = $state('');
 	let saving = $state(false);
+	let deleteError = $state('');
 
 	$effect(() => {
 		if (activeTab === 'secrets') loadSecrets();
@@ -41,7 +43,8 @@
 		loading = true;
 		try {
 			secrets = await listSecrets();
-		} catch {
+		} catch (e) {
+			console.warn('loadSecrets failed:', e);
 			secrets = [];
 		}
 		loading = false;
@@ -66,8 +69,8 @@
 		try {
 			const { value } = await revealSecret(name);
 			revealedValues = { ...revealedValues, [name]: value };
-		} catch {
-			/* ignore */
+		} catch (e) {
+			console.warn('revealSecret failed:', e);
 		}
 		const doneLoading = new Set(revealLoading);
 		doneLoading.delete(name);
@@ -133,7 +136,7 @@
 			await deleteSecret(name);
 			await loadSecrets();
 		} catch (e) {
-			alert(e instanceof Error ? e.message : 'Failed to delete secret');
+			deleteError = e instanceof Error ? e.message : 'Failed to delete secret';
 		}
 	}
 </script>
@@ -236,6 +239,8 @@
 					Add Secret
 				</button>
 			</div>
+
+			<MessageBanner bind:message={deleteError} />
 
 			<!-- Add/Edit form -->
 			{#if showForm}

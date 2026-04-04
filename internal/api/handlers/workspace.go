@@ -179,33 +179,9 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 			h.progress.Complete(wsID, err)
 		}()
 
-		respRepos := make([]RepoConfigResponse, len(config.Repos))
-		for i, r := range config.Repos {
-			respRepos[i] = RepoConfigResponse{
-				URL:     r.URL,
-				Branch:  r.Branch,
-				Primary: r.Primary,
-			}
-		}
-
-		resp := WorkspaceResponse{
-			ID:        wsID.String(),
-			TenantID:  tenantID.String(),
-			Name:      config.Name,
-			Status:    string(domain.WorkspaceCreating),
-			Mode:      string(config.Mode),
-			Repos:     respRepos,
-			CreatedAt: now.Format(time.RFC3339),
-			ExpiresAt: now.Add(config.MaxLifetime).Format(time.RFC3339),
-		}
-		if config.Investigation != nil {
-			resp.Investigation = &InvestigationStateResponse{
-				CatalogOrg: config.Investigation.CatalogOrg,
-			}
-		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(resp)
+		json.NewEncoder(w).Encode(pendingWorkspaceResponse(wsID, tenantID, config, now))
 		return
 	}
 
@@ -304,21 +280,14 @@ func (h *WorkspaceHandler) Action(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse: /api/workspaces/{id}/{action}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/workspaces/"), "/")
-	if len(parts) < 2 {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-
-	wsID, err := uuid.Parse(parts[0])
-	if err != nil {
-		http.Error(w, "invalid workspace ID", http.StatusBadRequest)
+	wsID, suffix, err := extractWorkspaceIDAndSuffix(r.URL.Path)
+	if err != nil || len(suffix) == 0 {
+		http.Error(w, "invalid workspace path", http.StatusBadRequest)
 		return
 	}
 
 	tenantID := middleware.TenantIDFromContext(r.Context())
-	action := parts[1]
+	action := suffix[0]
 
 	switch action {
 	case "suspend":
@@ -344,13 +313,7 @@ func (h *WorkspaceHandler) Action(w http.ResponseWriter, r *http.Request) {
 
 // CreationLogs streams workspace creation progress as Server-Sent Events.
 func (h *WorkspaceHandler) CreationLogs(w http.ResponseWriter, r *http.Request) {
-	// Parse: /api/workspaces/{id}/logs
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/workspaces/"), "/")
-	if len(parts) < 2 {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-	wsID, err := uuid.Parse(parts[0])
+	wsID, err := extractWorkspaceID(r.URL.Path)
 	if err != nil {
 		http.Error(w, "invalid workspace ID", http.StatusBadRequest)
 		return
@@ -416,13 +379,7 @@ func (h *WorkspaceHandler) ExecInWorkspace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Parse: /api/workspaces/{id}/exec
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/workspaces/"), "/")
-	if len(parts) < 2 {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-	wsID, err := uuid.Parse(parts[0])
+	wsID, err := extractWorkspaceID(r.URL.Path)
 	if err != nil {
 		http.Error(w, "invalid workspace ID", http.StatusBadRequest)
 		return
@@ -467,13 +424,7 @@ func (h *WorkspaceHandler) Activate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse: /api/workspaces/{id}/activate
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/workspaces/"), "/")
-	if len(parts) < 2 {
-		http.Error(w, "invalid path", http.StatusBadRequest)
-		return
-	}
-	wsID, err := uuid.Parse(parts[0])
+	wsID, err := extractWorkspaceID(r.URL.Path)
 	if err != nil {
 		http.Error(w, "invalid workspace ID", http.StatusBadRequest)
 		return
@@ -526,11 +477,46 @@ func (h *WorkspaceHandler) Activate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func extractWorkspaceID(path string) (uuid.UUID, error) {
-	// /api/workspaces/{id}
-	parts := strings.Split(strings.TrimPrefix(path, "/api/workspaces/"), "/")
-	if len(parts) == 0 {
-		return uuid.Nil, fmt.Errorf("missing workspace ID")
+func pendingWorkspaceResponse(wsID, tenantID uuid.UUID, config domain.WorkspaceConfig, now time.Time) WorkspaceResponse {
+	repos := make([]RepoConfigResponse, len(config.Repos))
+	for i, r := range config.Repos {
+		repos[i] = RepoConfigResponse{
+			URL:     r.URL,
+			Branch:  r.Branch,
+			Primary: r.Primary,
+		}
 	}
-	return uuid.Parse(parts[0])
+	resp := WorkspaceResponse{
+		ID:        wsID.String(),
+		TenantID:  tenantID.String(),
+		Name:      config.Name,
+		Status:    string(domain.WorkspaceCreating),
+		Mode:      string(config.Mode),
+		Repos:     repos,
+		CreatedAt: now.Format(time.RFC3339),
+		ExpiresAt: now.Add(config.MaxLifetime).Format(time.RFC3339),
+	}
+	if config.Investigation != nil {
+		resp.Investigation = &InvestigationStateResponse{
+			CatalogOrg: config.Investigation.CatalogOrg,
+		}
+	}
+	return resp
+}
+
+func extractWorkspaceIDAndSuffix(path string) (uuid.UUID, []string, error) {
+	parts := strings.Split(strings.TrimPrefix(path, "/api/workspaces/"), "/")
+	if len(parts) == 0 || parts[0] == "" {
+		return uuid.Nil, nil, fmt.Errorf("missing workspace ID")
+	}
+	id, err := uuid.Parse(parts[0])
+	if err != nil {
+		return uuid.Nil, nil, err
+	}
+	return id, parts[1:], nil
+}
+
+func extractWorkspaceID(path string) (uuid.UUID, error) {
+	id, _, err := extractWorkspaceIDAndSuffix(path)
+	return id, err
 }

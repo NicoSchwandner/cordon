@@ -3,9 +3,11 @@
 	import { decideApproval } from '$lib/shared/api/client';
 	import { connectApprovalsWS } from '$lib/shared/api/websocket';
 	import TierBadge from '$lib/shared/components/TierBadge.svelte';
+	import MessageBanner from '$lib/shared/components/MessageBanner.svelte';
 
 	let pending: ApprovalRequest[] = $state([]);
 	let deciding = $state(false);
+	let error = $state('');
 
 	const current = $derived(pending[0] ?? null);
 
@@ -19,12 +21,13 @@
 	async function decide(scope: 'one_time' | 'session') {
 		if (!current) return;
 		deciding = true;
+		error = '';
 		try {
 			await decideApproval(current.id, { scope });
-		} catch {
-			/* backend may not support full approval yet */
+			pending = pending.slice(1);
+		} catch (e) {
+			error = e instanceof Error ? e.message : 'Approval failed. The backend may be unavailable.';
 		}
-		pending = pending.slice(1);
 		deciding = false;
 	}
 
@@ -65,6 +68,8 @@
 			{#if pending.length > 1}
 				<p class="mb-4 text-xs text-foreground-faint">+{pending.length - 1} more pending</p>
 			{/if}
+
+			<MessageBanner bind:message={error} />
 
 			<div class="flex gap-2">
 				<button

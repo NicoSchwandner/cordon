@@ -73,6 +73,11 @@ test-e2e: ## Run E2E tests (starts full docker compose stack)
 check: ## Type-check frontend
 	cd web && npx svelte-check
 
+lint-web: ## Check frontend for banned patterns (alert, silent catches)
+	@echo "Checking for alert() calls..."
+	@! grep -rn 'alert(' web/src/routes/ web/src/lib/ --include='*.svelte' --include='*.ts' | grep -v node_modules | grep -v '// allowed' || (echo "ERROR: Use MessageBanner instead of alert()" && exit 1)
+	@echo "No alert() calls found."
+
 # — Utilities ————————————————————————————————————————————————
 
 clean: ## Remove build artifacts
