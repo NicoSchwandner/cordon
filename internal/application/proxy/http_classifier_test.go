@@ -3,8 +3,8 @@ package proxy
 import (
 	"testing"
 
-	"github.com/nicobistolfi/cordon/internal/application/ports"
-	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
 func TestHTTPClassifier(t *testing.T) {

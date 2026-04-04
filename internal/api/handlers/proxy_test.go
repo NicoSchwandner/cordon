@@ -9,10 +9,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nicobistolfi/cordon/internal/api/middleware"
-	"github.com/nicobistolfi/cordon/internal/application/proxy"
-	"github.com/nicobistolfi/cordon/internal/domain"
-	"github.com/nicobistolfi/cordon/internal/infrastructure/sops"
+	"github.com/NicoSchwandner/cordon/internal/api/middleware"
+	"github.com/NicoSchwandner/cordon/internal/application/proxy"
+	"github.com/NicoSchwandner/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/sops"
 )
 
 // mockAuditStore for handler tests

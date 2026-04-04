@@ -7,7 +7,7 @@ import (
 	"sync"
 
 	"github.com/google/uuid"
-	"github.com/nicobistolfi/cordon/internal/api/middleware"
+	"github.com/NicoSchwandner/cordon/internal/api/middleware"
 	"nhooyr.io/websocket"
 )
 

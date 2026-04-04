@@ -5,8 +5,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nicobistolfi/cordon/internal/application/ports"
-	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
 // Pipeline orchestrates the full proxy flow: egress check → classify → approve → swap → audit.

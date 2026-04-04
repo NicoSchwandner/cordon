@@ -5,7 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
 // AuditFilter specifies criteria for querying audit entries.

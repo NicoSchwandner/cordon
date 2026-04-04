@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/nicobistolfi/cordon/internal/application/ports"
-	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
 // AuditStore implements ports.AuditStore using PostgreSQL.

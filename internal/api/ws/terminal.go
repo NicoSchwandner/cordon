@@ -3,32 +3,29 @@ package ws
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
 
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/client"
 	"github.com/google/uuid"
-	"github.com/nicobistolfi/cordon/internal/api/middleware"
-	dockerprovider "github.com/nicobistolfi/cordon/internal/infrastructure/docker"
+	"github.com/NicoSchwandner/cordon/internal/api/middleware"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
 	"nhooyr.io/websocket"
 )
 
-// TerminalHandler relays terminal I/O between a WebSocket client and a workspace container.
-type TerminalHandler struct {
-	provider *dockerprovider.Provider
-	docker   *client.Client
+// TerminalProvider opens interactive terminal sessions for workspaces.
+type TerminalProvider interface {
+	OpenTerminal(ctx context.Context, tenantID, workspaceID uuid.UUID, opts ports.TerminalOpts) (ports.TerminalSession, error)
 }
 
-func NewTerminalHandler(provider *dockerprovider.Provider) (*TerminalHandler, error) {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return nil, err
-	}
-	return &TerminalHandler{provider: provider, docker: cli}, nil
+// TerminalHandler relays terminal I/O between a WebSocket client and a workspace container.
+type TerminalHandler struct {
+	terminals TerminalProvider
+}
+
+func NewTerminalHandler(tp TerminalProvider) *TerminalHandler {
+	return &TerminalHandler{terminals: tp}
 }
 
 type resizeMsg struct {
@@ -51,20 +48,19 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify auth
 	tenantID := middleware.TenantIDFromContext(r.Context())
 	if tenantID == uuid.Nil {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
-	// Get container info
-	info, err := h.provider.ContainerInfo(wsID)
+	// Open terminal session via backend-agnostic interface
+	session, err := h.terminals.OpenTerminal(r.Context(), tenantID, wsID, ports.TerminalOpts{})
 	if err != nil {
 		http.Error(w, "workspace not found", http.StatusNotFound)
 		return
 	}
-	containerID := info.ID
+	defer session.Close()
 
 	// Accept WebSocket
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -77,49 +73,6 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer conn.Close(websocket.StatusNormalClosure, "")
 
 	ctx := r.Context()
-
-	// Start an interactive shell in the workspace folder.
-	// Persistent sessions via tmux are deferred — refresh clears the terminal.
-	startDir := info.WorkspaceFolder
-	if startDir == "" {
-		startDir = "/"
-	}
-	shellCmd := fmt.Sprintf(
-		`cd %s && if command -v bash >/dev/null 2>&1; then exec bash -li; else exec sh -i; fi`,
-		startDir,
-	)
-
-	// Create exec with PTY
-	execConfig := container.ExecOptions{
-		Cmd:          []string{"/bin/sh", "-c", shellCmd},
-		Env:          []string{"TERM=xterm-256color"},
-		AttachStdin:  true,
-		AttachStdout: true,
-		AttachStderr: true,
-		Tty:          true,
-	}
-
-	execResp, err := h.docker.ContainerExecCreate(ctx, containerID, execConfig)
-	if err != nil {
-		log.Printf("exec create error: %v", err)
-		conn.Close(websocket.StatusInternalError, "failed to create exec")
-		return
-	}
-
-	hijack, err := h.docker.ContainerExecAttach(ctx, execResp.ID, container.ExecAttachOptions{Tty: true})
-	if err != nil {
-		log.Printf("exec attach error: %v", err)
-		conn.Close(websocket.StatusInternalError, "failed to attach")
-		return
-	}
-	defer hijack.Close()
-
-	// Start the exec
-	if err := h.docker.ContainerExecStart(ctx, execResp.ID, container.ExecStartOptions{Tty: true}); err != nil {
-		log.Printf("exec start error: %v", err)
-		return
-	}
-
 	done := make(chan struct{})
 
 	// Container stdout → WebSocket
@@ -127,7 +80,7 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		defer close(done)
 		buf := make([]byte, 4096)
 		for {
-			n, err := hijack.Reader.Read(buf)
+			n, err := session.Read(buf)
 			if err != nil {
 				if err != io.EOF {
 					log.Printf("container read error: %v", err)
@@ -149,19 +102,14 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if msgType == websocket.MessageText {
-				// Check for resize messages
 				var msg resizeMsg
 				if json.Unmarshal(data, &msg) == nil && msg.Type == "resize" {
-					h.docker.ContainerExecResize(ctx, execResp.ID, container.ResizeOptions{
-						Height: uint(msg.Rows),
-						Width:  uint(msg.Cols),
-					})
+					session.Resize(uint(msg.Rows), uint(msg.Cols))
 					continue
 				}
 			}
 
-			// Regular input
-			hijack.Conn.Write(data)
+			session.Write(data)
 		}
 	}()
 

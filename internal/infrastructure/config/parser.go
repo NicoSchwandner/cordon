@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/nicobistolfi/cordon/internal/application/ports"
-	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 	"gopkg.in/yaml.v3"
 )
 

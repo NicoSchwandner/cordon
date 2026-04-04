@@ -6,7 +6,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
-	"github.com/nicobistolfi/cordon/internal/infrastructure/sops"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/sops"
 )
 
 func setupSwapper() (*SecretSwapper, uuid.UUID) {

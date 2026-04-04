@@ -3,8 +3,8 @@ package proxy
 import (
 	"strings"
 
-	"github.com/nicobistolfi/cordon/internal/application/ports"
-	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
 // HTTPClassifier assigns tiers to HTTP requests based on method.

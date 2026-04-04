@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
-	gh "github.com/nicobistolfi/cordon/internal/infrastructure/github"
+	gh "github.com/NicoSchwandner/cordon/internal/infrastructure/github"
 )
 
 // GitHubHandler proxies GitHub API queries for the frontend.

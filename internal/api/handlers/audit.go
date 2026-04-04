@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nicobistolfi/cordon/internal/api/middleware"
-	"github.com/nicobistolfi/cordon/internal/application/audit"
-	"github.com/nicobistolfi/cordon/internal/application/ports"
-	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/api/middleware"
+	"github.com/NicoSchwandner/cordon/internal/application/audit"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
 // AuditHandler serves audit log queries.

@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 
-	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
 // Recovery catches panics and returns RFC 7807 ProblemDetails.

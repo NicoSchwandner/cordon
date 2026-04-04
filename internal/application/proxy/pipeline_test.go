@@ -7,9 +7,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nicobistolfi/cordon/internal/application/ports"
-	"github.com/nicobistolfi/cordon/internal/domain"
-	"github.com/nicobistolfi/cordon/internal/infrastructure/sops"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/sops"
 )
 
 // mockAuditStore records Write calls for verification.

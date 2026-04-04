@@ -12,18 +12,20 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/nicobistolfi/cordon/internal/api/handlers"
-	"github.com/nicobistolfi/cordon/internal/api/middleware"
-	apiws "github.com/nicobistolfi/cordon/internal/api/ws"
-	"github.com/nicobistolfi/cordon/internal/application/audit"
-	"github.com/nicobistolfi/cordon/internal/application/progress"
-	"github.com/nicobistolfi/cordon/internal/application/proxy"
-	"github.com/nicobistolfi/cordon/internal/infrastructure/devcontainer"
-	"github.com/nicobistolfi/cordon/internal/infrastructure/docker"
-	gh "github.com/nicobistolfi/cordon/internal/infrastructure/github"
-	"github.com/nicobistolfi/cordon/internal/infrastructure/postgres"
-	"github.com/nicobistolfi/cordon/internal/infrastructure/sops"
-	ws "github.com/nicobistolfi/cordon/internal/infrastructure/websocket"
+	"github.com/NicoSchwandner/cordon/internal/api/handlers"
+	"github.com/NicoSchwandner/cordon/internal/api/middleware"
+	apiws "github.com/NicoSchwandner/cordon/internal/api/ws"
+	"github.com/NicoSchwandner/cordon/internal/application/audit"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/application/progress"
+	"github.com/NicoSchwandner/cordon/internal/application/proxy"
+	"github.com/NicoSchwandner/cordon/internal/application/workspace"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/devcontainer"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/docker"
+	gh "github.com/NicoSchwandner/cordon/internal/infrastructure/github"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/postgres"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/sops"
+	ws "github.com/NicoSchwandner/cordon/internal/infrastructure/websocket"
 )
 
 func main() {
@@ -73,14 +75,26 @@ func main() {
 	timingStore := progress.NewTimingStore("data/build-timings.json")
 	progressStore := progress.NewStore(timingStore)
 
-	// Workspace orchestrator (Docker)
-	var workspaceProvider *docker.Provider
-	workspaceProvider, err = docker.NewProvider(dcBuilder, githubToken, ghClient)
+	// Workspace orchestrator (ComputeBackend → Orchestrator)
+	var orchestrator *workspace.Orchestrator
+	dockerBackend, err := docker.NewBackend()
 	if err != nil {
 		log.Printf("WARNING: Docker not available, workspace features disabled: %v", err)
-	}
-	if workspaceProvider != nil {
-		workspaceProvider.SetProgressStore(progressStore)
+	} else {
+		// Wrap concrete types in port adapters
+		var builder ports.ImageBuilder
+		if dcBuilder != nil {
+			builder = devcontainer.NewImageBuilderAdapter(dcBuilder)
+		}
+		gitHost := gh.NewGitHostAdapter(ghClient)
+
+		orchestrator = workspace.NewOrchestrator(workspace.OrchestratorConfig{
+			Backend:  dockerBackend,
+			Builder:  builder,
+			Token:    githubToken,
+			GitHost:  gitHost,
+			Progress: progressStore,
+		})
 	}
 
 	// Application services
@@ -121,7 +135,7 @@ func main() {
 	proxyHandler := handlers.NewProxyHandler(pipeline)
 	auditHandler := handlers.NewAuditHandler(auditService)
 	approvalHandler := handlers.NewApprovalHandler(approvalStore)
-	workspaceHandler := handlers.NewWorkspaceHandler(workspaceProvider, progressStore)
+	workspaceHandler := handlers.NewWorkspaceHandler(orchestrator, progressStore)
 	secretHandler := handlers.NewSecretHandler(vault)
 
 	githubHandler := handlers.NewGitHubHandler(ghClient)
@@ -168,13 +182,9 @@ func main() {
 
 	// WebSocket endpoints
 	agentRegistry := apiws.NewAgentRegistry()
-	if workspaceProvider != nil {
-		terminalHandler, err := apiws.NewTerminalHandler(workspaceProvider)
-		if err != nil {
-			log.Printf("WARNING: terminal handler not available: %v", err)
-		} else {
-			mux.Handle("/ws/terminal/", authMW(terminalHandler))
-		}
+	if orchestrator != nil {
+		terminalHandler := apiws.NewTerminalHandler(orchestrator)
+		mux.Handle("/ws/terminal/", authMW(terminalHandler))
 	}
 	mux.Handle("/ws/agent/", authMW(apiws.NewAgentWSHandler(agentRegistry)))
 	mux.Handle("/ws/approvals", authMW(apiws.NewApprovalWSHandler()))
@@ -200,7 +210,7 @@ func main() {
 		server.Shutdown(shutCtx)
 	}()
 
-	log.Printf("Cordon server starting on :%s (auth=%s, docker=%v)", port, authMode, workspaceProvider != nil)
+	log.Printf("Cordon server starting on :%s (auth=%s, workspaces=%v)", port, authMode, orchestrator != nil)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}

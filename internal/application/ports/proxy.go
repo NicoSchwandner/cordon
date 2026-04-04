@@ -1,6 +1,6 @@
 package ports
 
-import "github.com/nicobistolfi/cordon/internal/domain"
+import "github.com/NicoSchwandner/cordon/internal/domain"
 
 // TierOverride allows per-project tier escalation/de-escalation.
 type TierOverride struct {

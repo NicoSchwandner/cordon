@@ -2,7 +2,7 @@ package proxy
 
 import (
 	"github.com/google/uuid"
-	"github.com/nicobistolfi/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
 // QueryType indicates whether the proxied operation is SQL or HTTP.
