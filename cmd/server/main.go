@@ -20,6 +20,7 @@ import (
 	"github.com/NicoSchwandner/cordon/internal/application/progress"
 	"github.com/NicoSchwandner/cordon/internal/application/proxy"
 	"github.com/NicoSchwandner/cordon/internal/application/workspace"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/devcontainer"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/docker"
 	gh "github.com/NicoSchwandner/cordon/internal/infrastructure/github"
@@ -88,12 +89,26 @@ func main() {
 		}
 		gitHost := gh.NewGitHostAdapter(ghClient)
 
+		// Egress enforcement: workspace containers are placed on internal Docker
+		// networks that can only reach the Cordon proxy. This is always on unless
+		// explicitly disabled — running without it means any process inside a
+		// workspace can bypass the proxy and reach the internet directly.
+		egressDisabled := os.Getenv("CORDON_EGRESS_ENFORCE") == "false"
+		egressPolicy := domain.EgressPolicy{
+			Enabled:   !egressDisabled,
+			ProxyAddr: envOr("CORDON_PROXY_ADDR", "host.docker.internal:"+port),
+		}
+		if egressDisabled {
+			log.Println("WARNING: Network-level egress enforcement DISABLED (CORDON_EGRESS_ENFORCE=false). Workspace containers can reach any host.")
+		}
+
 		orchestrator = workspace.NewOrchestrator(workspace.OrchestratorConfig{
 			Backend:  dockerBackend,
 			Builder:  builder,
 			Token:    githubToken,
 			GitHost:  gitHost,
 			Progress: progressStore,
+			Egress:   egressPolicy,
 		})
 	}
 

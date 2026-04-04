@@ -67,8 +67,15 @@ type ComputeBackend interface {
 	PullImage(ctx context.Context, image string) error
 
 	// Networking
-	CreateNetwork(ctx context.Context, name string, labels map[string]string) (networkID string, err error)
+	CreateNetwork(ctx context.Context, name string, labels map[string]string, internal bool) (networkID string, err error)
 	RemoveNetwork(ctx context.Context, id string) error
+
+	// Egress enforcement — network-level isolation managed outside the container.
+	// EnsureProxyAccess makes the Cordon proxy reachable from an isolated network
+	// and returns the internal address workspace containers should use.
+	EnsureProxyAccess(ctx context.Context, networkName string, proxyAddr string, labels map[string]string) (internalProxyAddr string, err error)
+	// RemoveProxyAccess cleans up resources created by EnsureProxyAccess.
+	RemoveProxyAccess(ctx context.Context, networkName string) error
 
 	// Storage
 	CreateVolume(ctx context.Context, name string, labels map[string]string) error

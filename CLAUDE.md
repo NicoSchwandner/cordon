@@ -76,10 +76,12 @@ Enforced by `archtest/`:
 
 ## Environment Variables
 
-| Variable            | Default                               | Description               |
-| ------------------- | ------------------------------------- | ------------------------- |
-| `PORT`              | `8443`                                | Server listen port        |
-| `DATABASE_URL`      | `postgres://...localhost:5432/cordon` | PostgreSQL connection     |
-| `AUTH_MODE`         | `static`                              | `static` or `token`       |
-| `DEFAULT_TENANT_ID` | `00000000-...0001`                    | Tenant ID for static auth |
-| `CORDON_SERVER`     | `http://localhost:8443`               | CLI/E2E server URL        |
+| Variable                | Default                               | Description                                                |
+| ----------------------- | ------------------------------------- | ---------------------------------------------------------- |
+| `PORT`                  | `8443`                                | Server listen port                                         |
+| `DATABASE_URL`          | `postgres://...localhost:5432/cordon` | PostgreSQL connection                                      |
+| `AUTH_MODE`             | `static`                              | `static` or `token`                                        |
+| `DEFAULT_TENANT_ID`     | `00000000-...0001`                    | Tenant ID for static auth                                  |
+| `CORDON_SERVER`         | `http://localhost:8443`               | CLI/E2E server URL                                         |
+| `CORDON_PROXY_ADDR`     | `host.docker.internal:{PORT}`         | Address workspaces use to reach the proxy                  |
+| `CORDON_EGRESS_ENFORCE` | _(enabled by default)_                | Set to `false` to disable network-level egress enforcement |

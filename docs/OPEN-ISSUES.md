@@ -117,12 +117,14 @@ This is the linchpin for database investigation workflows — developers keep th
 
 ## Network-Level Egress Enforcement
 
-**Status:** Deferred
+**Status:** Done
 **Impact:** Security — egress allowlist is app-level only, bypassable
 
-The current egress control is enforced at the application level (Go proxy checks an allowlist). A compromised agent that bypasses the proxy (e.g., raw socket, curl to a different port) can reach any host.
+**Implementation:** When `CORDON_PROXY_ADDR` is set, workspace containers are placed on Docker internal networks that have no route to the outside world. A per-workspace gateway container bridges the internal network to the Cordon proxy — it's the only path out. The gateway runs on two networks: the internal workspace network and a standard bridge network that can reach the proxy. Workspace containers see only the gateway's internal IP (injected as `CORDON_PROXY_ADDR`).
 
-**Planned approach:** iptables/nftables rules on the workspace container's network that only allow traffic to the Cordon proxy. All outbound connections from the workspace must go through the proxy — enforced at the network layer, not just the application layer. Options: custom Docker network with iptables rules, or Envoy sidecar with strict egress policy.
+This is enforced by Docker at the network layer, outside the container's control. The workspace has no `CAP_NET_ADMIN` and cannot modify routing. Each backend implements isolation with its native mechanism (`ComputeBackend.EnsureProxyAccess`): Docker uses internal networks + gateway containers, future ACI backend will use NSG rules, Firecracker will use network namespace restrictions.
+
+Cleanup is automatic: `Destroy` removes the gateway container and its external network alongside the workspace containers.
 
 ## Real Authentication (OIDC / Entra ID)
 

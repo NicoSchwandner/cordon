@@ -25,10 +25,7 @@ func (o *Orchestrator) createBare(ctx context.Context, tenantID uuid.UUID, confi
 	log.Printf("[workspace] creating bare container %s (tenant=%s)", cName, tenantID.String()[:8])
 
 	networkName := cName + "-net"
-	_, err := o.backend.CreateNetwork(ctx, networkName, map[string]string{
-		"cordon.tenant":    tenantID.String(),
-		"cordon.workspace": wsID.String(),
-	})
+	internalProxyAddr, err := o.createIsolatedNetwork(ctx, networkName, tenantID, wsID)
 	if err != nil {
 		return domain.Workspace{}, err
 	}
@@ -40,6 +37,9 @@ func (o *Orchestrator) createBare(ctx context.Context, tenantID uuid.UUID, confi
 	env := []string{
 		"ZT_WORKSPACE_ID=" + wsID.String(),
 		"ZT_TENANT_ID=" + tenantID.String(),
+	}
+	if internalProxyAddr != "" {
+		env = append(env, "CORDON_PROXY_ADDR="+internalProxyAddr)
 	}
 
 	if _, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
@@ -114,13 +114,10 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 		emit("building_image", "Using cached image")
 	}
 
-	// Create network
+	// Create network with egress enforcement
 	emit("creating_container", "Creating container...")
 	networkName := cName + "-net"
-	networkID, err := o.backend.CreateNetwork(ctx, networkName, map[string]string{
-		"cordon.tenant":    tenantID.String(),
-		"cordon.workspace": wsID.String(),
-	})
+	internalProxyAddr, err := o.createIsolatedNetwork(ctx, networkName, tenantID, wsID)
 	if err != nil {
 		return domain.Workspace{}, err
 	}
@@ -142,6 +139,9 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 	for k, v := range result.Env {
 		env = append(env, k+"="+v)
 	}
+	if internalProxyAddr != "" {
+		env = append(env, "CORDON_PROXY_ADDR="+internalProxyAddr)
+	}
 
 	// Create and start the container
 	handle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
@@ -154,7 +154,10 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 		MemoryMB: config.MemoryMB,
 	})
 	if err != nil {
-		o.backend.RemoveNetwork(ctx, networkID)
+		if o.egress.Enabled {
+			o.backend.RemoveProxyAccess(ctx, networkName)
+		}
+		o.backend.RemoveNetwork(ctx, networkName)
 		return domain.Workspace{}, err
 	}
 
@@ -251,10 +254,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 
 	emit("creating_container", "Creating container...")
 	networkName := cName + "-net"
-	_, err = o.backend.CreateNetwork(ctx, networkName, map[string]string{
-		"cordon.tenant":    tenantID.String(),
-		"cordon.workspace": wsID.String(),
-	})
+	internalProxyAddr, err := o.createIsolatedNetwork(ctx, networkName, tenantID, wsID)
 	if err != nil {
 		return domain.Workspace{}, err
 	}
@@ -273,6 +273,9 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 	if o.token != "" {
 		env = append(env, "GITHUB_TOKEN="+o.token, "GH_TOKEN="+o.token)
 	}
+	if internalProxyAddr != "" {
+		env = append(env, "CORDON_PROXY_ADDR="+internalProxyAddr)
+	}
 
 	handle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
 		Name:     cName,
@@ -284,6 +287,9 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 		MemoryMB: config.MemoryMB,
 	})
 	if err != nil {
+		if o.egress.Enabled {
+			o.backend.RemoveProxyAccess(ctx, networkName)
+		}
 		o.backend.RemoveNetwork(ctx, networkName)
 		return domain.Workspace{}, err
 	}

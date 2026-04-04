@@ -82,6 +82,33 @@ func (o *Orchestrator) resolveDefaultBranch(repoURL string) string {
 	return "main"
 }
 
+// createIsolatedNetwork creates a workspace network with optional egress enforcement.
+// When egress policy is enabled, the network is internal (no external routing) and a
+// gateway container bridges it to the Cordon proxy. Returns the proxy address that
+// workspace containers should use (empty string if egress is disabled).
+func (o *Orchestrator) createIsolatedNetwork(ctx context.Context, networkName string, tenantID, wsID uuid.UUID) (string, error) {
+	labels := map[string]string{
+		"cordon.tenant":    tenantID.String(),
+		"cordon.workspace": wsID.String(),
+	}
+
+	_, err := o.backend.CreateNetwork(ctx, networkName, labels, o.egress.Enabled)
+	if err != nil {
+		return "", fmt.Errorf("creating network: %w", err)
+	}
+
+	if !o.egress.Enabled {
+		return "", nil
+	}
+
+	proxyAddr, err := o.backend.EnsureProxyAccess(ctx, networkName, o.egress.ProxyAddr, labels)
+	if err != nil {
+		o.backend.RemoveNetwork(ctx, networkName)
+		return "", fmt.Errorf("setting up proxy access: %w", err)
+	}
+	return proxyAddr, nil
+}
+
 func (o *Orchestrator) emitter(wsID uuid.UUID) func(step, msg string) {
 	return func(step, msg string) {
 		if o.progress != nil {

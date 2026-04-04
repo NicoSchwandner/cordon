@@ -224,13 +224,17 @@ func (b *Backend) PullImage(ctx context.Context, image string) error {
 	return nil
 }
 
-func (b *Backend) CreateNetwork(ctx context.Context, name string, labels map[string]string) (string, error) {
+func (b *Backend) CreateNetwork(ctx context.Context, name string, labels map[string]string, internal bool) (string, error) {
 	resp, err := b.client.NetworkCreate(ctx, name, network.CreateOptions{
-		Driver: "bridge",
-		Labels: labels,
+		Driver:   "bridge",
+		Labels:   labels,
+		Internal: internal,
 	})
 	if err != nil {
 		return "", fmt.Errorf("creating network: %w", err)
+	}
+	if internal {
+		log.Printf("[docker] created internal network %s (no external routing)", name)
 	}
 	return resp.ID, nil
 }

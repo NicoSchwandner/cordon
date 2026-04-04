@@ -23,6 +23,7 @@ type Orchestrator struct {
 	gitUser  *ports.GitIdentity    // resolved from git host API at startup
 	gitHost  ports.GitHostClient   // git hosting platform client (nil-safe)
 	progress *progress.Store       // optional progress event emitter
+	egress   domain.EgressPolicy   // network-level egress enforcement
 }
 
 // Compile-time check that Orchestrator satisfies WorkspaceService.
@@ -35,6 +36,7 @@ type OrchestratorConfig struct {
 	Token    string
 	GitHost  ports.GitHostClient
 	Progress *progress.Store
+	Egress   domain.EgressPolicy
 }
 
 // NewOrchestrator creates a workspace orchestrator.
@@ -45,6 +47,10 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		token:    cfg.Token,
 		gitHost:  cfg.GitHost,
 		progress: cfg.Progress,
+		egress:   cfg.Egress,
+	}
+	if o.egress.Enabled {
+		log.Printf("[workspace] network-level egress enforcement enabled (proxy=%s)", o.egress.ProxyAddr)
 	}
 
 	// Resolve git identity from hosting platform API
@@ -173,6 +179,11 @@ func (o *Orchestrator) Destroy(ctx context.Context, tenantID, workspaceID uuid.U
 	}
 
 	if networkName != "" {
+		if o.egress.Enabled {
+			if err := o.backend.RemoveProxyAccess(ctx, networkName); err != nil {
+				log.Printf("[workspace] warning: proxy access cleanup failed: %v", err)
+			}
+		}
 		if err := o.backend.RemoveNetwork(ctx, networkName); err != nil {
 			log.Printf("[workspace] warning: network remove failed: %v", err)
 		}
@@ -305,12 +316,9 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 	emit("creating_workspace", fmt.Sprintf("Starting workspace for %s...", shortName))
 
 	networkName := cName + "-net"
-	_, err = o.backend.CreateNetwork(ctx, networkName, map[string]string{
-		"cordon.tenant":    tenantID.String(),
-		"cordon.workspace": newWSID.String(),
-	})
+	internalProxyAddr, err := o.createIsolatedNetwork(ctx, networkName, tenantID, newWSID)
 	if err != nil {
-		return fmt.Errorf("creating network: %w", err)
+		return err
 	}
 
 	env := []string{
@@ -322,6 +330,9 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 	}
 	for k, v := range result.Env {
 		env = append(env, k+"="+v)
+	}
+	if internalProxyAddr != "" {
+		env = append(env, "CORDON_PROXY_ADDR="+internalProxyAddr)
 	}
 
 	newHandle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
