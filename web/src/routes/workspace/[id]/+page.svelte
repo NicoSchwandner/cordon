@@ -8,15 +8,22 @@
 	import type { WorkspaceResponse } from '$lib/shared/api/types';
 	import { connectTerminalWS } from '$lib/shared/api/websocket';
 	import { createTerminal } from '$lib/platform/terminal';
+	import { page } from '$app/state';
 
 	let { data } = $props();
 
+	// Use navigation state as fallback when workspace data isn't loaded yet
+	// (container doesn't exist during creation, so GET returns 404)
+	const navState = page.state as Record<string, unknown> | undefined;
+	const initialWorkspace = data.workspace ?? (navState?.workspace as WorkspaceResponse | undefined) ?? null;
+
+	let workspace = $state<WorkspaceResponse | null>(initialWorkspace);
 	let terminalEl: HTMLDivElement | undefined = $state();
 	let creationDone = $state(false);
-	const isCreating = $derived(!creationDone && (!data.workspace || data.workspace.status === 'creating'));
-	const isInvestigation = $derived(data.workspace?.mode === 'investigation');
-	const investigation = $derived(data.workspace?.investigation);
-	const repos = $derived(data.workspace?.repos || []);
+	const isCreating = $derived(!creationDone && (!workspace || workspace.status === 'creating'));
+	const isInvestigation = $derived(workspace?.mode === 'investigation');
+	const investigation = $derived(workspace?.investigation);
+	const repos = $derived(workspace?.repos || []);
 	const primaryRepo = $derived(repos.find(r => r.primary) || repos[0]);
 
 	// Investigation state
@@ -55,7 +62,7 @@
 				if (evt.done) {
 					activatingRepo = '';
 					activationProgress = '';
-					getWorkspace(data.workspaceId).then(ws => { data.workspace = ws; }).catch(() => {});
+					getWorkspace(data.workspaceId).then(ws => { workspace = ws; }).catch(() => {});
 				}
 			});
 		} catch (e) {
@@ -69,7 +76,7 @@
 		// Refresh workspace data then switch to terminal view
 		try {
 			const ws = await getWorkspace(data.workspaceId);
-			data.workspace = ws;
+			workspace = ws;
 		} catch {
 			// workspace may still be initializing, retry
 		}
@@ -109,8 +116,8 @@
 		actionError = '';
 		try {
 			const result = await extendWorkspace(data.workspaceId, duration);
-			if (data.workspace) {
-				data.workspace = { ...data.workspace, expires_at: result.expires_at };
+			if (workspace) {
+				workspace = { ...workspace, expires_at: result.expires_at };
 			}
 		} catch (e) {
 			actionError = e instanceof Error ? e.message : 'Extend failed';
@@ -137,14 +144,14 @@
 		<div class="min-w-0 flex-1">
 			<div class="flex items-center gap-3">
 				<a href="/" class="text-foreground-faint transition-colors hover:text-foreground">&larr;</a>
-				{#if data.workspace}
-					<h1 class="text-xl font-semibold tracking-tight text-foreground">{data.workspace.name}</h1>
-					<StatusDot status={data.workspace.status} />
+				{#if workspace}
+					<h1 class="text-xl font-semibold tracking-tight text-foreground">{workspace.name}</h1>
+					<StatusDot status={workspace.status} />
 				{:else}
 					<h1 class="text-xl font-semibold tracking-tight text-foreground">Workspace {data.workspaceId}</h1>
 				{/if}
 			</div>
-			{#if data.workspace}
+			{#if workspace}
 				{#if isInvestigation && investigation}
 					<div class="mt-1.5 flex items-center gap-2">
 						<span class="rounded-full bg-info-badge-bg px-2.5 py-1 text-xs text-info-text">{investigation.catalog_org}</span>
@@ -165,10 +172,10 @@
 			{/if}
 		</div>
 		<div class="flex shrink-0 items-center gap-3">
-			{#if data.workspace?.status === 'running' || data.workspace?.status === 'suspended'}
+			{#if workspace?.status === 'running' || workspace?.status === 'suspended'}
 				<div class="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5">
-					<span class="text-xs"><TimeRemaining expiresAt={data.workspace.expires_at} label="TTL" /></span>
-					{#if data.workspace.status === 'running'}
+					<span class="text-xs"><TimeRemaining expiresAt={workspace.expires_at} label="TTL" /></span>
+					{#if workspace.status === 'running'}
 						<button
 							onclick={() => handleExtend('2h')}
 							disabled={extending}
@@ -177,12 +184,12 @@
 					{/if}
 				</div>
 			{/if}
-			{#if data.workspace?.status === 'running'}
+			{#if workspace?.status === 'running'}
 				<button
 					onclick={() => handleAction('suspend')}
 					class="rounded-lg border border-border-input px-3 py-1.5 text-sm text-foreground-secondary transition-colors hover:bg-hover-subtle"
 				>Suspend</button>
-			{:else if data.workspace?.status === 'suspended'}
+			{:else if workspace?.status === 'suspended'}
 				<button
 					onclick={() => handleAction('resume')}
 					class="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-on-primary transition-colors hover:bg-primary-hover"
@@ -230,7 +237,7 @@
 							{#if activated}
 								{@const spawned = spawnedWorkspaceForRepo(repoURL)}
 								<a
-									href="/workspace/{spawned?.id || data.workspace?.id}"
+									href="/workspace/{spawned?.id || workspace?.id}"
 									class="shrink-0 rounded-full bg-success-badge-bg px-2 py-0.5 text-xs text-success-text hover:underline"
 								>Open</a>
 							{:else}

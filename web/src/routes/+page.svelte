@@ -7,6 +7,7 @@
 	import RepoPicker from '$lib/shared/components/RepoPicker.svelte';
 	import MessageBanner from '$lib/shared/components/MessageBanner.svelte';
 	import { getContext } from 'svelte';
+	import { goto } from '$app/navigation';
 	import { createWorkspace, listOrgRepos } from '$lib/shared/api/client';
 	import type { WorkspaceResponse, OrgRepo } from '$lib/shared/api/types';
 
@@ -88,7 +89,7 @@
 				}
 				const name = newName.trim() || `investigate-${org}`;
 				const ws = await createWorkspace({ name, mode: 'investigation', org });
-				window.location.href = `/workspace/${ws.id}`;
+				goto(`/workspace/${ws.id}`, { state: { workspace: ws } });
 			} else {
 				if (!picker) return;
 				const repoConfigs = picker.getRepoConfigs();
@@ -99,7 +100,7 @@
 					req.repos = repoConfigs;
 				}
 				const ws = await createWorkspace(req);
-				window.location.href = `/workspace/${ws.id}`;
+				goto(`/workspace/${ws.id}`, { state: { workspace: ws } });
 			}
 		} catch (e) {
 			createError = e instanceof Error ? e.message : 'Failed to create workspace';
