@@ -126,6 +126,19 @@ This is enforced by Docker at the network layer, outside the container's control
 
 Cleanup is automatic: `Destroy` removes the gateway container and its external network alongside the workspace containers.
 
+## Persistent Workspace Store
+
+**Status:** Deferred
+**Impact:** Reliability — workspace state is lost if containers are deleted outside Cordon
+
+Workspace state (name, repos, TTL, mode, investigation state, etc.) lives entirely in Docker container labels. There is no workspace table in Postgres — only audit logs are persisted. If a container is removed outside of Cordon (`docker rm`), the workspace vanishes with no trace. Historical workspaces cannot be queried.
+
+This also blocks multi-backend support: Docker labels, Azure resource tags, and Firecracker metadata all have different semantics and size limits. Relying on compute-layer metadata as the source of truth ties the orchestrator to Docker conventions.
+
+**Planned approach:** Introduce a `workspaces` table in Postgres as the authoritative store. Write workspace state on create, update on suspend/resume/extend/destroy. Container state becomes a secondary signal (used for health/running status). This enables workspace history, cost tracking, and decouples the orchestrator from any specific compute backend's metadata model.
+
+**Prerequisites:** None. Can be done incrementally — write to DB alongside labels first, then migrate reads.
+
 ## Real Authentication (OIDC / Entra ID)
 
 **Status:** Deferred

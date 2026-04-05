@@ -100,6 +100,13 @@ func (c *Client) ResolveDefaultBranch(repoURL string) string {
 	return branch
 }
 
+// UserOrg represents a GitHub organization the authenticated user belongs to.
+type UserOrg struct {
+	Login       string `json:"login"`
+	Description string `json:"description"`
+	AvatarURL   string `json:"avatar_url"`
+}
+
 // FetchUser queries the GitHub API for the authenticated user's identity.
 func (c *Client) FetchUser() (*GitIdentity, error) {
 	if c.token == "" {
@@ -125,6 +132,43 @@ func (c *Client) FetchUser() (*GitIdentity, error) {
 	}
 
 	return &GitIdentity{Name: name, Email: email}, nil
+}
+
+// FetchUsername returns the authenticated user's login name.
+func (c *Client) FetchUsername() (string, error) {
+	if c.token == "" {
+		return "", fmt.Errorf("no GitHub token configured")
+	}
+	var user struct {
+		Login string `json:"login"`
+	}
+	if err := c.get("https://api.github.com/user", "", &user, nil); err != nil {
+		return "", err
+	}
+	return user.Login, nil
+}
+
+// ListUserOrgs returns organizations the authenticated user belongs to.
+func (c *Client) ListUserOrgs() ([]UserOrg, error) {
+	if c.token == "" {
+		return nil, fmt.Errorf("no GitHub token configured")
+	}
+
+	var all []UserOrg
+	page := 1
+	for {
+		url := fmt.Sprintf("https://api.github.com/user/orgs?per_page=100&page=%d", page)
+		var orgs []UserOrg
+		if err := c.get(url, "", &orgs, nil); err != nil {
+			return nil, fmt.Errorf("listing user orgs (page %d): %w", page, err)
+		}
+		all = append(all, orgs...)
+		if len(orgs) < 100 {
+			break
+		}
+		page++
+	}
+	return all, nil
 }
 
 // ListOrgRepos returns all repositories for a GitHub organization, with caching.

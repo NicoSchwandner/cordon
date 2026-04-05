@@ -55,6 +55,42 @@ func (h *GitHubHandler) OrgRepos(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(repos)
 }
 
+// UserOrgs returns organizations the authenticated user belongs to, plus
+// the user's own login as a pseudo-org for personal repos.
+func (h *GitHubHandler) UserOrgs(w http.ResponseWriter, r *http.Request) {
+	if h.client == nil || !h.client.HasToken() {
+		http.Error(w, "GitHub token not configured", http.StatusServiceUnavailable)
+		return
+	}
+
+	username, err := h.client.FetchUsername()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	orgs, err := h.client.ListUserOrgs()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+
+	type orgEntry struct {
+		Login       string `json:"login"`
+		Description string `json:"description"`
+		Personal    bool   `json:"personal"`
+	}
+
+	result := make([]orgEntry, 0, len(orgs)+1)
+	result = append(result, orgEntry{Login: username, Personal: true})
+	for _, o := range orgs {
+		result = append(result, orgEntry{Login: o.Login, Description: o.Description})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 // RepoBranches returns the list of branches for a GitHub repository.
 func (h *GitHubHandler) RepoBranches(w http.ResponseWriter, r *http.Request) {
 	owner := r.PathValue("owner")

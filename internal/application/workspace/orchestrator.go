@@ -116,7 +116,7 @@ func (o *Orchestrator) List(ctx context.Context, tenantID uuid.UUID) ([]domain.W
 
 	result := make([]domain.Workspace, 0, len(handles))
 	for _, h := range handles {
-		if h.Labels["cordon.service-for"] != "" {
+		if h.Labels["cordon.service-for"] != "" || h.Labels["cordon.egress-gateway"] != "" {
 			continue
 		}
 		result = append(result, handleToWorkspace(h))

@@ -6,10 +6,10 @@
 	import TimeRemaining from '$lib/shared/components/TimeRemaining.svelte';
 	import RepoPicker from '$lib/shared/components/RepoPicker.svelte';
 	import MessageBanner from '$lib/shared/components/MessageBanner.svelte';
-	import { getContext } from 'svelte';
+	import { getContext, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { createWorkspace, listOrgRepos } from '$lib/shared/api/client';
-	import type { WorkspaceResponse, OrgRepo } from '$lib/shared/api/types';
+	import { createWorkspace, listOrgRepos, listUserOrgs } from '$lib/shared/api/client';
+	import type { WorkspaceResponse, OrgRepo, UserOrg } from '$lib/shared/api/types';
 
 	const getHealthy = getContext<() => boolean | null>('healthy');
 	const healthy = $derived(getHealthy());
@@ -26,7 +26,8 @@
 
 	// Org catalog state
 	let org = $state('');
-	let orgInput = $state('');
+	let userOrgs: UserOrg[] = $state([]);
+	let orgsLoading = $state(false);
 	let orgRepos: OrgRepo[] = $state([]);
 	let orgLoading = $state(false);
 	let orgError = $state('');
@@ -52,22 +53,30 @@
 		};
 	}
 
-	async function loadOrg() {
-		const target = orgInput.trim();
+	onMount(async () => {
+		orgsLoading = true;
+		try {
+			userOrgs = await listUserOrgs();
+		} catch {
+			// GitHub token may not be configured — dropdown stays empty
+		}
+		orgsLoading = false;
+	});
+
+	async function selectOrg(target: string) {
 		if (!target) {
 			org = '';
 			orgRepos = [];
 			return;
 		}
+		org = target;
 		orgLoading = true;
 		orgError = '';
 		try {
 			orgRepos = await listOrgRepos(target);
-			org = target;
 		} catch (e) {
-			orgError = e instanceof Error ? e.message : 'Failed to load org';
+			orgError = e instanceof Error ? e.message : 'Failed to load repos';
 			orgRepos = [];
-			org = '';
 		}
 		orgLoading = false;
 	}
@@ -164,30 +173,30 @@
 
 				<!-- Org selector -->
 				<div>
-					<label for="org-input" class="mb-1 block text-xs font-medium text-foreground-muted">
+					<label for="org-select" class="mb-1 block text-xs font-medium text-foreground-muted">
 						GitHub Organization {#if wsMode === 'dev'}<span class="font-normal text-foreground-faint">(optional — enables repo picker)</span>{:else}<span class="font-normal text-foreground-faint">(required — all repos will be shallow-cloned)</span>{/if}
 					</label>
-					<div class="flex gap-2">
-						<input
-							id="org-input"
-							bind:value={orgInput}
-							placeholder="e.g. WintDev"
-							onkeydown={(e) => { if (e.key === 'Enter') { e.preventDefault(); loadOrg(); } }}
-							class="flex-1 rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
-						/>
-						<button
-							type="button"
-							onclick={loadOrg}
-							disabled={orgLoading || !orgInput.trim()}
-							class="rounded-lg border border-border-input px-3 py-2 text-sm text-foreground-secondary transition-colors hover:bg-hover-subtle disabled:cursor-not-allowed disabled:opacity-50"
-						>
-							{orgLoading ? 'Loading...' : org ? 'Reload' : 'Load'}
-						</button>
-					</div>
+					<select
+						id="org-select"
+						value={org}
+						onchange={(e) => selectOrg(e.currentTarget.value)}
+						disabled={orgsLoading}
+						class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring disabled:opacity-50"
+					>
+						<option value="">{orgsLoading ? 'Loading orgs...' : 'Select organization'}</option>
+						{#each userOrgs as userOrg}
+							<option value={userOrg.login}>
+								{userOrg.login}{userOrg.personal ? ' (personal)' : ''}{userOrg.description ? ` — ${userOrg.description}` : ''}
+							</option>
+						{/each}
+					</select>
+					{#if orgLoading}
+						<p class="mt-1 text-xs text-foreground-faint">Loading repos...</p>
+					{/if}
 					{#if orgError}
 						<p class="mt-1 text-xs text-danger-text">{orgError}</p>
 					{/if}
-					{#if org && orgRepos.length > 0}
+					{#if org && orgRepos.length > 0 && !orgLoading}
 						<p class="mt-1 text-xs text-foreground-faint">
 							{orgRepos.filter(r => !r.archived).length} repos available
 							{#if orgRepos.some(r => r.archived)}

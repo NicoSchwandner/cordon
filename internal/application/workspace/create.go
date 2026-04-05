@@ -124,7 +124,11 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 	labels := baseLabels(tenantID, wsID, config.Name, now, config.MaxLifetime)
 	reposJSON, _ := json.Marshal(config.Repos)
 	labels["cordon.repos"] = string(reposJSON)
-	labels["cordon.workspace-folder"] = "/workspace"
+	if len(config.Repos) == 1 {
+		labels["cordon.workspace-folder"] = "/workspace/" + domain.RepoShortName(config.Repos[0].URL)
+	} else {
+		labels["cordon.workspace-folder"] = "/workspace"
+	}
 
 	// Environment
 	env := []string{

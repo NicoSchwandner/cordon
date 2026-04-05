@@ -117,7 +117,7 @@ func (ca *CA) CertForHost(hostname string) (*tls.Certificate, error) {
 	}
 
 	tlsCert := &tls.Certificate{
-		Certificate: [][]byte{certDER},
+		Certificate: [][]byte{certDER, ca.cert.Raw},
 		PrivateKey:  key,
 	}
 

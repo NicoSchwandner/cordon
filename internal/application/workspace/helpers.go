@@ -81,7 +81,7 @@ CERT
 		log.Printf("[workspace] warning: CA cert write failed: %v", err)
 		return
 	}
-	if _, err := o.backend.Exec(ctx, containerID, "update-ca-certificates 2>/dev/null || true"); err != nil {
+	if _, err := o.backend.Exec(ctx, containerID, "update-ca-certificates --fresh 2>/dev/null || true"); err != nil {
 		log.Printf("[workspace] warning: CA cert install failed: %v", err)
 	}
 }

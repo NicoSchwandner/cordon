@@ -11,6 +11,7 @@ import type {
   SQLProxyRequest,
   SecretRef,
   SetSecretRequest,
+  UserOrg,
   WorkspaceResponse,
   CreateWorkspaceRequest,
 } from "./types";
@@ -149,6 +150,10 @@ export function getDefaultBranch(
     "GET",
     `/api/github/default-branch?repo=${encodeURIComponent(repo)}`,
   );
+}
+
+export function listUserOrgs(): Promise<UserOrg[]> {
+  return fetchJSON("GET", "/api/github/user/orgs");
 }
 
 export function listOrgRepos(org: string): Promise<OrgRepo[]> {

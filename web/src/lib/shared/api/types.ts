@@ -106,6 +106,12 @@ export interface CreateWorkspaceRequest {
   max_lifetime?: string;
 }
 
+export interface UserOrg {
+  login: string;
+  description: string;
+  personal: boolean;
+}
+
 export interface OrgRepo {
   name: string;
   full_name: string;

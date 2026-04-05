@@ -202,6 +202,7 @@ func main() {
 	mux.Handle("DELETE /api/secrets/", authMW(http.HandlerFunc(secretHandler.Delete)))
 
 	// GitHub API proxy (works without Docker — only needs GitHub token)
+	mux.Handle("GET /api/github/user/orgs", authMW(http.HandlerFunc(githubHandler.UserOrgs)))
 	mux.Handle("GET /api/github/default-branch", authMW(http.HandlerFunc(githubHandler.DefaultBranch)))
 	mux.Handle("GET /api/github/orgs/{org}/repos", authMW(http.HandlerFunc(githubHandler.OrgRepos)))
 	mux.Handle("GET /api/github/repos/{owner}/{repo}/branches", authMW(http.HandlerFunc(githubHandler.RepoBranches)))
