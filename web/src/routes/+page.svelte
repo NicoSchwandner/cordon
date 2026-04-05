@@ -3,6 +3,7 @@
 	import DecisionBadge from '$lib/shared/components/DecisionBadge.svelte';
 	import TimeAgo from '$lib/shared/components/TimeAgo.svelte';
 	import StatusDot from '$lib/shared/components/StatusDot.svelte';
+	import TimeRemaining from '$lib/shared/components/TimeRemaining.svelte';
 	import RepoPicker from '$lib/shared/components/RepoPicker.svelte';
 	import MessageBanner from '$lib/shared/components/MessageBanner.svelte';
 	import { getContext } from 'svelte';
@@ -295,6 +296,11 @@
 						{:else}
 							<div class="text-xs text-foreground-faint">
 								Created {new Date(ws.created_at).toLocaleDateString()}
+							</div>
+						{/if}
+						{#if ws.status === 'running' || ws.status === 'suspended'}
+							<div class="mt-2 text-xs">
+								<TimeRemaining expiresAt={ws.expires_at} label="TTL" />
 							</div>
 						{/if}
 					</a>

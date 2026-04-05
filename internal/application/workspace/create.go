@@ -38,9 +38,7 @@ func (o *Orchestrator) createBare(ctx context.Context, tenantID uuid.UUID, confi
 		"ZT_WORKSPACE_ID=" + wsID.String(),
 		"ZT_TENANT_ID=" + tenantID.String(),
 	}
-	if internalProxyAddr != "" {
-		env = append(env, "CORDON_PROXY_ADDR="+internalProxyAddr)
-	}
+	env = append(env, proxyEnv(internalProxyAddr)...)
 
 	if _, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
 		Name:     cName,
@@ -139,9 +137,7 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 	for k, v := range result.Env {
 		env = append(env, k+"="+v)
 	}
-	if internalProxyAddr != "" {
-		env = append(env, "CORDON_PROXY_ADDR="+internalProxyAddr)
-	}
+	env = append(env, proxyEnv(internalProxyAddr)...)
 
 	// Create and start the container
 	handle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
@@ -273,9 +269,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 	if o.token != "" {
 		env = append(env, "GITHUB_TOKEN="+o.token, "GH_TOKEN="+o.token)
 	}
-	if internalProxyAddr != "" {
-		env = append(env, "CORDON_PROXY_ADDR="+internalProxyAddr)
-	}
+	env = append(env, proxyEnv(internalProxyAddr)...)
 
 	handle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
 		Name:     cName,

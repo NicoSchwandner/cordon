@@ -104,6 +104,13 @@ export function workspaceAction(
   return fetchJSON("POST", `/api/workspaces/${id}/${action}`);
 }
 
+export function extendWorkspace(
+  id: string,
+  duration: string,
+): Promise<{ expires_at: string }> {
+  return fetchJSON("POST", `/api/workspaces/${id}/extend`, { duration });
+}
+
 export function activateRepos(
   workspaceId: string,
   repoURLs: string[],

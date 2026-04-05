@@ -19,13 +19,19 @@ type TerminalProvider interface {
 	OpenTerminal(ctx context.Context, tenantID, workspaceID uuid.UUID, opts ports.TerminalOpts) (ports.TerminalSession, error)
 }
 
+// ActivityRecorder records workspace activity for idle timeout tracking.
+type ActivityRecorder interface {
+	RecordActivity(wsID uuid.UUID)
+}
+
 // TerminalHandler relays terminal I/O between a WebSocket client and a workspace container.
 type TerminalHandler struct {
 	terminals TerminalProvider
+	activity  ActivityRecorder
 }
 
-func NewTerminalHandler(tp TerminalProvider) *TerminalHandler {
-	return &TerminalHandler{terminals: tp}
+func NewTerminalHandler(tp TerminalProvider, ar ActivityRecorder) *TerminalHandler {
+	return &TerminalHandler{terminals: tp, activity: ar}
 }
 
 type resizeMsg struct {
@@ -61,6 +67,10 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer session.Close()
+
+	if h.activity != nil {
+		h.activity.RecordActivity(wsID)
+	}
 
 	// Accept WebSocket
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -99,6 +109,10 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			msgType, data, err := conn.Read(ctx)
 			if err != nil {
 				return
+			}
+
+			if h.activity != nil {
+				h.activity.RecordActivity(wsID)
 			}
 
 			if msgType == websocket.MessageText {

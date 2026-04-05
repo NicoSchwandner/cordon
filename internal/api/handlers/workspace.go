@@ -16,13 +16,26 @@ import (
 	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
+// WorkspaceActivityRecorder records workspace activity for idle timeout tracking.
+type WorkspaceActivityRecorder interface {
+	RecordActivity(wsID uuid.UUID)
+}
+
+// WorkspaceTTLExtender manages TTL overrides for workspaces.
+type WorkspaceTTLExtender interface {
+	SetExpiry(wsID uuid.UUID, expiresAt time.Time)
+	EffectiveExpiry(wsID uuid.UUID, labelExpiry time.Time) time.Time
+}
+
 type WorkspaceHandler struct {
 	service  ports.WorkspaceService
 	progress *progress.Store
+	activity WorkspaceActivityRecorder // optional, nil-safe
+	ttl      WorkspaceTTLExtender      // optional, nil-safe
 }
 
-func NewWorkspaceHandler(service ports.WorkspaceService, ps *progress.Store) *WorkspaceHandler {
-	return &WorkspaceHandler{service: service, progress: ps}
+func NewWorkspaceHandler(service ports.WorkspaceService, ps *progress.Store, ar WorkspaceActivityRecorder, ttl WorkspaceTTLExtender) *WorkspaceHandler {
+	return &WorkspaceHandler{service: service, progress: ps, activity: ar, ttl: ttl}
 }
 
 type RepoConfigRequest struct {
@@ -42,6 +55,7 @@ type CreateWorkspaceRequest struct {
 	DevcontainerPath string              `json:"devcontainer_path"`
 	CPU              int                 `json:"cpu"`
 	MemoryMB         int                 `json:"memory_mb"`
+	MaxLifetime      string              `json:"max_lifetime,omitempty"` // e.g. "8h", "4h30m"
 }
 
 type RepoConfigResponse struct {
@@ -69,6 +83,8 @@ type WorkspaceResponse struct {
 	Investigation *InvestigationStateResponse    `json:"investigation,omitempty"`
 	CreatedAt     string                        `json:"created_at"`
 	ExpiresAt     string                        `json:"expires_at"`
+	IdleTimeout   string                        `json:"idle_timeout,omitempty"`
+	MaxLifetime   string                        `json:"max_lifetime,omitempty"`
 }
 
 func toWorkspaceResponse(ws domain.Workspace) WorkspaceResponse {
@@ -83,14 +99,16 @@ func toWorkspaceResponse(ws domain.Workspace) WorkspaceResponse {
 		}
 	}
 	resp := WorkspaceResponse{
-		ID:        ws.ID.String(),
-		TenantID:  ws.TenantID.String(),
-		Name:      ws.Name,
-		Status:    string(ws.Status),
-		Mode:      string(ws.Config.Mode),
-		Repos:     repos,
-		CreatedAt: ws.CreatedAt.Format(time.RFC3339),
-		ExpiresAt: ws.ExpiresAt.Format(time.RFC3339),
+		ID:          ws.ID.String(),
+		TenantID:    ws.TenantID.String(),
+		Name:        ws.Name,
+		Status:      string(ws.Status),
+		Mode:        string(ws.Config.Mode),
+		Repos:       repos,
+		CreatedAt:   ws.CreatedAt.Format(time.RFC3339),
+		ExpiresAt:   ws.ExpiresAt.Format(time.RFC3339),
+		IdleTimeout: ws.Config.IdleTimeout.String(),
+		MaxLifetime: ws.Config.MaxLifetime.String(),
 	}
 	if ws.SpawnedFrom != nil {
 		resp.SpawnedFrom = ws.SpawnedFrom.String()
@@ -139,6 +157,16 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	maxLifetime := 8 * time.Hour
+	if req.MaxLifetime != "" {
+		parsed, err := time.ParseDuration(req.MaxLifetime)
+		if err != nil || parsed < time.Minute || parsed > 24*time.Hour {
+			http.Error(w, "invalid max_lifetime (must be between 1m and 24h)", http.StatusBadRequest)
+			return
+		}
+		maxLifetime = parsed
+	}
+
 	config := domain.WorkspaceConfig{
 		Name:             name,
 		Repos:            repos,
@@ -146,7 +174,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		CPU:              max(req.CPU, 1),
 		MemoryMB:         max(req.MemoryMB, 512),
 		IdleTimeout:      15 * time.Minute,
-		MaxLifetime:      24 * time.Hour,
+		MaxLifetime:      maxLifetime,
 	}
 
 	// Investigation mode
@@ -220,7 +248,7 @@ func (h *WorkspaceHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	resp := make([]WorkspaceResponse, len(workspaces))
 	for i, ws := range workspaces {
-		resp[i] = toWorkspaceResponse(ws)
+		resp[i] = h.withEffectiveExpiry(ws)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -247,7 +275,7 @@ func (h *WorkspaceHandler) Get(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(toWorkspaceResponse(ws))
+	json.NewEncoder(w).Encode(h.withEffectiveExpiry(ws))
 }
 
 func (h *WorkspaceHandler) Delete(w http.ResponseWriter, r *http.Request) {
@@ -404,6 +432,10 @@ func (h *WorkspaceHandler) ExecInWorkspace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if h.activity != nil {
+		h.activity.RecordActivity(wsID)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ExecResponse{
 		ExitCode: exitCode,
@@ -477,6 +509,79 @@ func (h *WorkspaceHandler) Activate(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// withEffectiveExpiry patches the ExpiresAt field with the TTL override if one exists.
+func (h *WorkspaceHandler) withEffectiveExpiry(ws domain.Workspace) WorkspaceResponse {
+	resp := toWorkspaceResponse(ws)
+	if h.ttl != nil {
+		effective := h.ttl.EffectiveExpiry(ws.ID, ws.ExpiresAt)
+		resp.ExpiresAt = effective.Format(time.RFC3339)
+	}
+	return resp
+}
+
+type ExtendRequest struct {
+	Duration string `json:"duration"` // e.g. "2h", "1h30m"
+}
+
+// Extend extends the TTL of a running workspace.
+func (h *WorkspaceHandler) Extend(w http.ResponseWriter, r *http.Request) {
+	if h.service == nil || h.ttl == nil {
+		middleware.WriteProblem(w, domain.ProblemDetails{
+			Type: "https://cordon.dev/problems/not-implemented", Title: "Not Implemented",
+			Status: 501, Detail: "Lifecycle management not configured", Code: "not_implemented",
+		})
+		return
+	}
+
+	wsID, err := extractWorkspaceID(r.URL.Path)
+	if err != nil {
+		http.Error(w, "invalid workspace ID", http.StatusBadRequest)
+		return
+	}
+
+	var req ExtendRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	duration, err := time.ParseDuration(req.Duration)
+	if err != nil || duration <= 0 || duration > 24*time.Hour {
+		http.Error(w, "invalid duration (must be between 1m and 24h)", http.StatusBadRequest)
+		return
+	}
+
+	tenantID := middleware.TenantIDFromContext(r.Context())
+	ws, err := h.service.Get(r.Context(), tenantID, wsID)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+
+	// Compute new expiry: extend from current effective expiry or now, whichever is later
+	currentExpiry := h.ttl.EffectiveExpiry(ws.ID, ws.ExpiresAt)
+	now := time.Now().UTC()
+	base := currentExpiry
+	if now.After(base) {
+		base = now
+	}
+	newExpiry := base.Add(duration)
+
+	// Hard ceiling: can't extend more than 24h from now
+	maxExpiry := now.Add(24 * time.Hour)
+	if newExpiry.After(maxExpiry) {
+		newExpiry = maxExpiry
+	}
+
+	h.ttl.SetExpiry(ws.ID, newExpiry)
+	log.Printf("[workspace] TTL extended for %s: new expiry %s", wsID.String()[:8], newExpiry.Format(time.RFC3339))
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"expires_at": newExpiry.Format(time.RFC3339),
+	})
+}
+
 func pendingWorkspaceResponse(wsID, tenantID uuid.UUID, config domain.WorkspaceConfig, now time.Time) WorkspaceResponse {
 	repos := make([]RepoConfigResponse, len(config.Repos))
 	for i, r := range config.Repos {
@@ -487,14 +592,16 @@ func pendingWorkspaceResponse(wsID, tenantID uuid.UUID, config domain.WorkspaceC
 		}
 	}
 	resp := WorkspaceResponse{
-		ID:        wsID.String(),
-		TenantID:  tenantID.String(),
-		Name:      config.Name,
-		Status:    string(domain.WorkspaceCreating),
-		Mode:      string(config.Mode),
-		Repos:     repos,
-		CreatedAt: now.Format(time.RFC3339),
-		ExpiresAt: now.Add(config.MaxLifetime).Format(time.RFC3339),
+		ID:          wsID.String(),
+		TenantID:    tenantID.String(),
+		Name:        config.Name,
+		Status:      string(domain.WorkspaceCreating),
+		Mode:        string(config.Mode),
+		Repos:       repos,
+		CreatedAt:   now.Format(time.RFC3339),
+		ExpiresAt:   now.Add(config.MaxLifetime).Format(time.RFC3339),
+		IdleTimeout: config.IdleTimeout.String(),
+		MaxLifetime: config.MaxLifetime.String(),
 	}
 	if config.Investigation != nil {
 		resp.Investigation = &InvestigationStateResponse{

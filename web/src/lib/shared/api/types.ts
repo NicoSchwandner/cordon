@@ -91,6 +91,8 @@ export interface WorkspaceResponse {
   investigation?: InvestigationState;
   created_at: string;
   expires_at: string;
+  idle_timeout?: string;
+  max_lifetime?: string;
 }
 
 export interface CreateWorkspaceRequest {
@@ -101,6 +103,7 @@ export interface CreateWorkspaceRequest {
   devcontainer_path?: string;
   cpu?: number;
   memory_mb?: number;
+  max_lifetime?: string;
 }
 
 export interface OrgRepo {

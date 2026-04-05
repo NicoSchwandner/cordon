@@ -99,6 +99,7 @@ func (b *Backend) UnpauseContainer(ctx context.Context, id string) error {
 }
 
 // Exec runs a shell command (via sh -c) and waits for completion.
+// Returns an error if the command exits with a non-zero code.
 func (b *Backend) Exec(ctx context.Context, id string, cmd string) (int, error) {
 	execResp, err := b.client.ContainerExecCreate(ctx, id, container.ExecOptions{
 		Cmd:          []string{"sh", "-c", cmd},
@@ -113,7 +114,14 @@ func (b *Backend) Exec(ctx context.Context, id string, cmd string) (int, error) 
 		return -1, fmt.Errorf("starting exec: %w", err)
 	}
 
-	return b.waitExec(ctx, execResp.ID)
+	exitCode, err := b.waitExec(ctx, execResp.ID)
+	if err != nil {
+		return exitCode, err
+	}
+	if exitCode != 0 {
+		return exitCode, fmt.Errorf("command exited with code %d", exitCode)
+	}
+	return 0, nil
 }
 
 // ExecWithOutput runs a shell command and returns its stdout.
@@ -271,7 +279,11 @@ func (b *Backend) FindContainer(ctx context.Context, labels map[string]string) (
 func (b *Backend) ListContainers(ctx context.Context, labels map[string]string) ([]ports.ContainerHandle, error) {
 	args := filters.NewArgs()
 	for k, v := range labels {
-		args.Add("label", k+"="+v)
+		if v == "" {
+			args.Add("label", k) // match any value (label exists)
+		} else {
+			args.Add("label", k+"="+v) // match exact value
+		}
 	}
 
 	containers, err := b.client.ContainerList(ctx, container.ListOptions{

@@ -109,6 +109,25 @@ func (o *Orchestrator) createIsolatedNetwork(ctx context.Context, networkName st
 	return proxyAddr, nil
 }
 
+// proxyEnv returns env vars that configure standard HTTP proxy settings,
+// routing tools like git, curl, and apt through the Cordon proxy. Empty if
+// egress enforcement is disabled.
+func proxyEnv(internalProxyAddr string) []string {
+	if internalProxyAddr == "" {
+		return nil
+	}
+	proxyURL := "http://" + internalProxyAddr
+	return []string{
+		"CORDON_PROXY_ADDR=" + internalProxyAddr,
+		"http_proxy=" + proxyURL,
+		"https_proxy=" + proxyURL,
+		"HTTP_PROXY=" + proxyURL,
+		"HTTPS_PROXY=" + proxyURL,
+		"no_proxy=localhost,127.0.0.1",
+		"NO_PROXY=localhost,127.0.0.1",
+	}
+}
+
 func (o *Orchestrator) emitter(wsID uuid.UUID) func(step, msg string) {
 	return func(step, msg string) {
 		if o.progress != nil {
@@ -171,7 +190,7 @@ func handleToWorkspace(h ports.ContainerHandle) domain.Workspace {
 		created = time.Now().UTC()
 	}
 	if expires.IsZero() {
-		expires = created.Add(24 * time.Hour)
+		expires = created.Add(8 * time.Hour)
 	}
 
 	status := domain.WorkspaceRunning

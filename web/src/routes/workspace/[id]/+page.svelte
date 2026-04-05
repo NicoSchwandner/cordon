@@ -1,9 +1,10 @@
 <script lang="ts">
 	import StatusDot from '$lib/shared/components/StatusDot.svelte';
+	import TimeRemaining from '$lib/shared/components/TimeRemaining.svelte';
 	import CreationProgress from '$lib/shared/components/CreationProgress.svelte';
 	import AgentPanel from '$lib/security/AgentPanel.svelte';
 	import MessageBanner from '$lib/shared/components/MessageBanner.svelte';
-	import { workspaceAction, deleteWorkspace, getWorkspace, activateRepos, connectCreationSSE } from '$lib/shared/api/client';
+	import { workspaceAction, deleteWorkspace, getWorkspace, activateRepos, connectCreationSSE, extendWorkspace } from '$lib/shared/api/client';
 	import type { WorkspaceResponse } from '$lib/shared/api/types';
 	import { connectTerminalWS } from '$lib/shared/api/websocket';
 	import { createTerminal } from '$lib/platform/terminal';
@@ -101,6 +102,23 @@
 		}
 	}
 
+	let extending = $state(false);
+
+	async function handleExtend(duration: string) {
+		extending = true;
+		actionError = '';
+		try {
+			const result = await extendWorkspace(data.workspaceId, duration);
+			if (data.workspace) {
+				data.workspace = { ...data.workspace, expires_at: result.expires_at };
+			}
+		} catch (e) {
+			actionError = e instanceof Error ? e.message : 'Extend failed';
+		} finally {
+			extending = false;
+		}
+	}
+
 	async function handleDelete() {
 		if (!confirm('Destroy this workspace? This cannot be undone.')) return;
 		actionError = '';
@@ -146,7 +164,19 @@
 				{/if}
 			{/if}
 		</div>
-		<div class="flex shrink-0 gap-2">
+		<div class="flex shrink-0 items-center gap-3">
+			{#if data.workspace?.status === 'running' || data.workspace?.status === 'suspended'}
+				<div class="flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5">
+					<span class="text-xs"><TimeRemaining expiresAt={data.workspace.expires_at} label="TTL" /></span>
+					{#if data.workspace.status === 'running'}
+						<button
+							onclick={() => handleExtend('2h')}
+							disabled={extending}
+							class="ml-1 rounded bg-surface-raised px-1.5 py-0.5 text-xs text-foreground-secondary transition-colors hover:bg-hover-subtle disabled:opacity-50"
+						>{extending ? '...' : '+2h'}</button>
+					{/if}
+				</div>
+			{/if}
 			{#if data.workspace?.status === 'running'}
 				<button
 					onclick={() => handleAction('suspend')}

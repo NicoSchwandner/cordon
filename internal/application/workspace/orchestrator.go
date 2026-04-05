@@ -306,7 +306,7 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 
 	newWSID := uuid.New()
 	now := time.Now().UTC()
-	maxLifetime := 24 * time.Hour
+	maxLifetime := 8 * time.Hour
 	cName := containerName(shortName, newWSID)
 	labels := baseLabels(tenantID, newWSID, shortName, now, maxLifetime)
 	labels["cordon.spawned-from"] = workspaceID.String()
@@ -331,9 +331,7 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 	for k, v := range result.Env {
 		env = append(env, k+"="+v)
 	}
-	if internalProxyAddr != "" {
-		env = append(env, "CORDON_PROXY_ADDR="+internalProxyAddr)
-	}
+	env = append(env, proxyEnv(internalProxyAddr)...)
 
 	newHandle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
 		Name:     cName,

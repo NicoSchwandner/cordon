@@ -145,12 +145,23 @@ func main() {
 		authValidator = &middleware.StaticAuth{TenantID: tenantID, UserID: "developer"}
 	}
 
+	// Workspace lifecycle management (idle timeout + TTL enforcement)
+	var lifecycleMgr *workspace.LifecycleManager
+	var reaperCancel context.CancelFunc
+	if orchestrator != nil {
+		lifecycleMgr = workspace.NewLifecycleManager(15 * time.Minute)
+		reaper := workspace.NewReaper(dockerBackend, orchestrator, lifecycleMgr, 30*time.Second)
+		var reaperCtx context.Context
+		reaperCtx, reaperCancel = context.WithCancel(context.Background())
+		go reaper.Start(reaperCtx)
+	}
+
 	// Handlers
 	healthHandler := handlers.NewHealthHandler(pool)
 	proxyHandler := handlers.NewProxyHandler(pipeline)
 	auditHandler := handlers.NewAuditHandler(auditService)
 	approvalHandler := handlers.NewApprovalHandler(approvalStore)
-	workspaceHandler := handlers.NewWorkspaceHandler(orchestrator, progressStore)
+	workspaceHandler := handlers.NewWorkspaceHandler(orchestrator, progressStore, lifecycleMgr, lifecycleMgr)
 	secretHandler := handlers.NewSecretHandler(vault)
 
 	githubHandler := handlers.NewGitHubHandler(ghClient)
@@ -193,19 +204,32 @@ func main() {
 	mux.Handle("DELETE /api/workspaces/", authMW(http.HandlerFunc(workspaceHandler.Delete)))
 	mux.Handle("POST /api/workspaces/{id}/activate", authMW(http.HandlerFunc(workspaceHandler.Activate)))
 	mux.Handle("POST /api/workspaces/{id}/exec", authMW(http.HandlerFunc(workspaceHandler.ExecInWorkspace)))
+	mux.Handle("POST /api/workspaces/{id}/extend", authMW(http.HandlerFunc(workspaceHandler.Extend)))
 	mux.Handle("POST /api/workspaces/{id}/{action}", authMW(http.HandlerFunc(workspaceHandler.Action)))
 
 	// WebSocket endpoints
 	agentRegistry := apiws.NewAgentRegistry()
 	if orchestrator != nil {
-		terminalHandler := apiws.NewTerminalHandler(orchestrator)
+		terminalHandler := apiws.NewTerminalHandler(orchestrator, lifecycleMgr)
 		mux.Handle("/ws/terminal/", authMW(terminalHandler))
 	}
 	mux.Handle("/ws/agent/", authMW(apiws.NewAgentWSHandler(agentRegistry)))
 	mux.Handle("/ws/approvals", authMW(apiws.NewApprovalWSHandler()))
 	mux.Handle("/ws/audit", authMW(apiws.NewAuditWSHandler()))
 
-	handler := middleware.Logger(middleware.Recovery(mux))
+	// HTTP CONNECT handler — lets workspace containers route git/curl/apt through
+	// the proxy via standard http_proxy/https_proxy env vars, same egress path as
+	// explicit /api/proxy/http calls.
+	connectHandler := handlers.NewConnectHandler(egress)
+	handler := middleware.Logger(middleware.Recovery(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodConnect {
+				connectHandler.ServeHTTP(w, r)
+				return
+			}
+			mux.ServeHTTP(w, r)
+		}),
+	))
 
 	server := &http.Server{
 		Addr:         ":" + port,
@@ -220,6 +244,9 @@ func main() {
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
 		log.Println("Shutting down...")
+		if reaperCancel != nil {
+			reaperCancel()
+		}
 		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		server.Shutdown(shutCtx)
