@@ -11,6 +11,7 @@
 		url: string;
 		// shared
 		branch: string;
+		newBranch: string;
 		detectedBranch: string;
 		branches: GitBranch[];
 		branchSearch: string;
@@ -37,6 +38,7 @@
 			repoSearch: '',
 			url: '',
 			branch: '',
+			newBranch: '',
 			detectedBranch: '',
 			branches: [],
 			branchSearch: '',
@@ -136,8 +138,11 @@
 		return rows
 			.filter(r => r.mode === 'org' ? r.selectedRepo != null : r.url.trim().length > 0)
 			.map((r, i) => {
+				const effectiveBranch = r.newBranch.trim() || r.branch || undefined;
+				const baseBranch = r.newBranch.trim() ? (r.branch || r.detectedBranch || undefined) : undefined;
 				const base = {
-					branch: r.branch || undefined,
+					branch: effectiveBranch,
+					base_branch: baseBranch,
 					primary: i === 0,
 					service_container: i > 0 && r.serviceContainer ? true : undefined,
 				};
@@ -231,40 +236,50 @@
 				</div>
 
 				<!-- Branch selection -->
-				<div class="relative">
-					{#if row.branches.length > 0}
-						<input
-							type="text"
-							bind:value={row.branchSearch}
-							onfocus={() => { row.showBranchDropdown = true; }}
-							onblur={() => { setTimeout(() => { row.showBranchDropdown = false; }, 200); }}
-							placeholder={row.detectedBranch || 'branch (auto-detect)'}
-							class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
-						/>
-						{#if row.showBranchDropdown}
-							<div class="absolute z-20 mt-1 max-h-48 w-full overflow-y-auto rounded-lg border border-border bg-surface shadow-lg">
-								{#each filteredBranches(row) as branch}
-									<button
-										type="button"
-										onmousedown={() => selectBranch(i, branch.name)}
-										class="w-full px-3 py-1.5 text-left text-sm hover:bg-hover-subtle {row.branch === branch.name ? 'bg-hover-subtle font-medium' : ''}"
-									>
-										{branch.name}
-										{#if branch.name === row.detectedBranch}
-											<span class="text-xs text-foreground-faint">(default)</span>
-										{/if}
-									</button>
-								{:else}
-									<div class="px-3 py-2 text-sm text-foreground-faint">No branches found</div>
-								{/each}
-							</div>
+				<div class="space-y-1.5">
+					<div class="relative">
+						{#if row.branches.length > 0}
+							<input
+								type="text"
+								bind:value={row.branchSearch}
+								onfocus={() => { row.showBranchDropdown = true; }}
+								onblur={() => { setTimeout(() => { row.showBranchDropdown = false; }, 200); }}
+								placeholder={row.detectedBranch || 'branch (auto-detect)'}
+								class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+							/>
+							{#if row.showBranchDropdown}
+								<div class="absolute z-20 mt-1 max-h-48 w-full overflow-y-auto rounded-lg border border-border bg-surface shadow-lg">
+									{#each filteredBranches(row) as branch}
+										<button
+											type="button"
+											onmousedown={() => selectBranch(i, branch.name)}
+											class="w-full px-3 py-1.5 text-left text-sm hover:bg-hover-subtle {row.branch === branch.name ? 'bg-hover-subtle font-medium' : ''}"
+										>
+											{branch.name}
+											{#if branch.name === row.detectedBranch}
+												<span class="text-xs text-foreground-faint">(default)</span>
+											{/if}
+										</button>
+									{:else}
+										<div class="px-3 py-2 text-sm text-foreground-faint">No branches found</div>
+									{/each}
+								</div>
+							{/if}
+						{:else}
+							<input
+								type="text"
+								bind:value={row.branch}
+								placeholder={row.detectedBranch || 'branch (auto-detect)'}
+								class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+							/>
 						{/if}
-					{:else}
+					</div>
+					{#if row.branch || row.detectedBranch}
 						<input
 							type="text"
-							bind:value={row.branch}
-							placeholder={row.detectedBranch || 'branch (auto-detect)'}
-							class="w-full rounded-lg border border-border-input bg-surface px-3 py-2 text-sm text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
+							bind:value={row.newBranch}
+							placeholder="New branch (optional)"
+							class="w-full rounded-lg border border-border-input bg-surface px-2.5 py-1.5 text-xs text-foreground placeholder:text-foreground-faint focus:border-transparent focus:outline-none focus:ring-2 focus:ring-ring"
 						/>
 					{/if}
 				</div>

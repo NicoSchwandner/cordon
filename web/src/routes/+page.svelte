@@ -41,6 +41,7 @@
 			repoSearch: '',
 			url: '',
 			branch: '',
+			newBranch: '',
 			detectedBranch: '',
 			branches: [] as import('$lib/shared/api/types').GitBranch[],
 			branchSearch: '',
