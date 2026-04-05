@@ -24,6 +24,7 @@ type Orchestrator struct {
 	gitHost  ports.GitHostClient   // git hosting platform client (nil-safe)
 	progress *progress.Store       // optional progress event emitter
 	egress   domain.EgressPolicy   // network-level egress enforcement
+	caPem    []byte                // MITM CA cert PEM for container trust store injection
 }
 
 // Compile-time check that Orchestrator satisfies WorkspaceService.
@@ -37,6 +38,7 @@ type OrchestratorConfig struct {
 	GitHost  ports.GitHostClient
 	Progress *progress.Store
 	Egress   domain.EgressPolicy
+	CAPem    []byte // MITM CA certificate to inject into containers
 }
 
 // NewOrchestrator creates a workspace orchestrator.
@@ -48,6 +50,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		gitHost:  cfg.GitHost,
 		progress: cfg.Progress,
 		egress:   cfg.Egress,
+		caPem:    cfg.CAPem,
 	}
 	if o.egress.Enabled {
 		log.Printf("[workspace] network-level egress enforcement enabled (proxy=%s)", o.egress.ProxyAddr)
@@ -325,9 +328,6 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 		"ZT_WORKSPACE_ID=" + newWSID.String(),
 		"ZT_TENANT_ID=" + tenantID.String(),
 	}
-	if o.token != "" {
-		env = append(env, "GITHUB_TOKEN="+o.token, "GH_TOKEN="+o.token)
-	}
 	for k, v := range result.Env {
 		env = append(env, k+"="+v)
 	}
@@ -346,8 +346,9 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 		return fmt.Errorf("starting workspace container: %w", err)
 	}
 
+	o.installCACert(ctx, newHandle.ID)
 	emit("cloning_repo", fmt.Sprintf("Cloning %s...", shortName))
-	o.configureGit(ctx, newHandle.ID)
+	o.configureGit(ctx, newHandle.ID, internalProxyAddr)
 	o.backend.Exec(ctx, newHandle.ID, "mkdir -p /workspace")
 
 	cloneURL := o.cloneURL(repoURL)

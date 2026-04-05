@@ -146,6 +146,12 @@ func (r *Reaper) tick(ctx context.Context) {
 			continue
 		}
 
+		// Skip workspaces still within their initial setup window — creation
+		// (image build + clone + post-create) can take longer than the idle timeout.
+		if now.Sub(ws.CreatedAt) < r.lm.idleTimeout {
+			continue
+		}
+
 		lastActivity, hasActivity := r.lm.LastActivity(ws.ID)
 		if !hasActivity {
 			// No activity ever recorded — use creation time as baseline

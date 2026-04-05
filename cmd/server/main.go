@@ -26,6 +26,7 @@ import (
 	gh "github.com/NicoSchwandner/cordon/internal/infrastructure/github"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/postgres"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/sops"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/tlsca"
 	ws "github.com/NicoSchwandner/cordon/internal/infrastructure/websocket"
 )
 
@@ -76,6 +77,14 @@ func main() {
 	timingStore := progress.NewTimingStore("data/build-timings.json")
 	progressStore := progress.NewStore(timingStore)
 
+	// MITM CA — signs per-hostname TLS certificates so the proxy can inspect
+	// HTTPS traffic from workspace containers transparently.
+	ca, err := tlsca.New()
+	if err != nil {
+		log.Fatalf("creating MITM CA: %v", err)
+	}
+	log.Printf("MITM CA ready (%d byte cert)", len(ca.PEM()))
+
 	// Workspace orchestrator (ComputeBackend → Orchestrator)
 	var orchestrator *workspace.Orchestrator
 	dockerBackend, err := docker.NewBackend()
@@ -109,6 +118,7 @@ func main() {
 			GitHost:  gitHost,
 			Progress: progressStore,
 			Egress:   egressPolicy,
+			CAPem:    ca.PEM(),
 		})
 	}
 
@@ -219,17 +229,16 @@ func main() {
 
 	// HTTP CONNECT handler — lets workspace containers route git/curl/apt through
 	// the proxy via standard http_proxy/https_proxy env vars, same egress path as
-	// explicit /api/proxy/http calls.
-	connectHandler := handlers.NewConnectHandler(egress)
-	handler := middleware.Logger(middleware.Recovery(
-		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method == http.MethodConnect {
-				connectHandler.ServeHTTP(w, r)
-				return
-			}
-			mux.ServeHTTP(w, r)
-		}),
-	))
+	// explicit /api/proxy/http calls. Sits before Logger/Recovery because CONNECT
+	// tunnels hijack the connection for raw TCP — they're not request/response.
+	connectHandler := handlers.NewConnectHandler(egress, pipeline, ca, tenantID)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect {
+			connectHandler.ServeHTTP(w, r)
+			return
+		}
+		middleware.Logger(middleware.Recovery(mux)).ServeHTTP(w, r)
+	})
 
 	server := &http.Server{
 		Addr:         ":" + port,

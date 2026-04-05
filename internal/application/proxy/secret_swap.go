@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/base64"
 	"strings"
 
 	"github.com/google/uuid"
@@ -52,7 +53,11 @@ func (s *SecretSwapper) Swap(ctx context.Context, tenantID uuid.UUID, req *Proxy
 	modified.SQLQuery = replaceSecrets(req.SQLQuery, replacements, refs, seen)
 	modified.Path = replaceSecrets(req.Path, replacements, refs, seen)
 	for k, v := range modified.Headers {
-		modified.Headers[k] = replaceSecrets(v, replacements, refs, seen)
+		if strings.EqualFold(k, "Authorization") {
+			modified.Headers[k] = replaceSecretsInAuth(v, replacements, refs, seen)
+		} else {
+			modified.Headers[k] = replaceSecrets(v, replacements, refs, seen)
+		}
 	}
 
 	for name := range seen {
@@ -85,6 +90,31 @@ func placeholderToName(refs []domain.SecretRef, placeholder string) string {
 		}
 	}
 	return placeholder
+}
+
+// replaceSecretsInAuth handles Authorization headers where credentials may be
+// base64-encoded (e.g. "Basic base64(user:placeholder)"). It first tries plain
+// replacement, then decodes Basic auth, swaps inside the decoded value, and
+// re-encodes.
+func replaceSecretsInAuth(val string, replacements map[string]string, refs []domain.SecretRef, seen map[string]bool) string {
+	// Try plain replacement first (covers Bearer tokens etc.)
+	result := replaceSecrets(val, replacements, refs, seen)
+	if result != val {
+		return result
+	}
+
+	// Decode Basic auth and try replacement inside the decoded value
+	if after, found := strings.CutPrefix(val, "Basic "); found {
+		decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(after))
+		if err != nil {
+			return val
+		}
+		swapped := replaceSecrets(string(decoded), replacements, refs, seen)
+		if swapped != string(decoded) {
+			return "Basic " + base64.StdEncoding.EncodeToString([]byte(swapped))
+		}
+	}
+	return val
 }
 
 func replaceSecrets(s string, replacements map[string]string, refs []domain.SecretRef, seen map[string]bool) string {

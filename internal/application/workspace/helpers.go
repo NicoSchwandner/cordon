@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/url"
 	"strings"
 	"time"
 
@@ -38,9 +37,11 @@ func (o *Orchestrator) findPrimaryContainer(ctx context.Context, tenantID, works
 	return handles[0], nil
 }
 
-func (o *Orchestrator) configureGit(ctx context.Context, containerID string) {
+func (o *Orchestrator) configureGit(ctx context.Context, containerID, proxyAddr string) {
 	if o.token != "" {
-		credHelper := `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=$GITHUB_TOKEN"; }; f'`
+		// Credential helper returns a placeholder — the MITM proxy swaps it
+		// with the real token. The real secret never enters the container.
+		credHelper := `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=cordon-placeholder-github-token"; }; f'`
 		if _, err := o.backend.Exec(ctx, containerID, credHelper); err != nil {
 			log.Printf("[workspace] warning: git credential helper setup failed: %v", err)
 		}
@@ -51,28 +52,47 @@ func (o *Orchestrator) configureGit(ctx context.Context, containerID string) {
 			log.Printf("[workspace] warning: git identity setup failed: %v", err)
 		}
 	}
+	// Configure git to route through the Cordon proxy (same egress path as all
+	// other traffic). This is more reliable than env vars alone — some git builds
+	// or container images don't respect https_proxy consistently.
+	if proxyAddr != "" {
+		proxyURL := "http://" + proxyAddr
+		proxyCfg := fmt.Sprintf(`git config --global http.proxy %s`, proxyURL)
+		if _, err := o.backend.Exec(ctx, containerID, proxyCfg); err != nil {
+			log.Printf("[workspace] warning: git proxy setup failed: %v", err)
+		}
+	}
+}
+
+// installCACert installs the MITM CA certificate into the container's system
+// trust store so that TLS connections through the proxy are trusted by all tools.
+func (o *Orchestrator) installCACert(ctx context.Context, containerID string) {
+	if len(o.caPem) == 0 {
+		return
+	}
+	// Write CA cert and update the trust store. Supports both Debian/Ubuntu
+	// (update-ca-certificates) and Alpine (update-ca-certificates with a
+	// different path). Falls back gracefully if neither is available.
+	writeCmd := fmt.Sprintf(`cat > /usr/local/share/ca-certificates/cordon-ca.crt << 'CERT'
+%s
+CERT
+`, string(o.caPem))
+	if _, err := o.backend.Exec(ctx, containerID, writeCmd); err != nil {
+		log.Printf("[workspace] warning: CA cert write failed: %v", err)
+		return
+	}
+	if _, err := o.backend.Exec(ctx, containerID, "update-ca-certificates 2>/dev/null || true"); err != nil {
+		log.Printf("[workspace] warning: CA cert install failed: %v", err)
+	}
 }
 
 func (o *Orchestrator) cloneURL(repo string) string {
-	if o.token == "" {
-		if !strings.Contains(repo, "://") {
-			return "https://" + repo
-		}
-		return repo
+	// Plain HTTPS URL — no embedded credentials. The MITM proxy handles auth
+	// by swapping the placeholder in the git credential helper's response.
+	if !strings.Contains(repo, "://") {
+		return "https://" + repo
 	}
-	repoURL := repo
-	if !strings.Contains(repoURL, "://") {
-		repoURL = "https://" + repoURL
-	}
-	u, err := url.Parse(repoURL)
-	if err != nil {
-		return repoURL
-	}
-	if !strings.HasSuffix(u.Path, ".git") {
-		u.Path += ".git"
-	}
-	u.User = url.UserPassword("x-access-token", o.token)
-	return u.String()
+	return repo
 }
 
 func (o *Orchestrator) resolveDefaultBranch(repoURL string) string {
@@ -126,6 +146,14 @@ func proxyEnv(internalProxyAddr string) []string {
 		"no_proxy=localhost,127.0.0.1",
 		"NO_PROXY=localhost,127.0.0.1",
 	}
+}
+
+// redactToken removes a GitHub token from output to prevent leaking in logs.
+func redactToken(output, token string) string {
+	if token == "" {
+		return output
+	}
+	return strings.ReplaceAll(output, token, "***")
 }
 
 func (o *Orchestrator) emitter(wsID uuid.UUID) func(step, msg string) {

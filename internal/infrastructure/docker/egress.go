@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"strings"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	dockerimage "github.com/docker/docker/api/types/image"
@@ -112,6 +113,17 @@ func (b *Backend) EnsureProxyAccess(ctx context.Context, networkName string, pro
 	}
 
 	internalAddr := fmt.Sprintf("%s:%s", internalIP, gatewayPort)
+
+	// Wait for socat to start listening. The gateway runs apk add + socat,
+	// which takes a few seconds. Without this, workspace containers may try
+	// to connect before the gateway is ready.
+	//
+	// We check from *inside* the gateway container because the internal network
+	// IP is unreachable from the host.
+	if err := b.waitForGatewayReady(ctx, resp.ID, 60*time.Second); err != nil {
+		log.Printf("[docker] warning: gateway readiness check failed: %v", err)
+	}
+
 	log.Printf("[docker] gateway %s ready, workspace proxy addr: %s", gwName, internalAddr)
 	return internalAddr, nil
 }
@@ -175,6 +187,39 @@ func splitHostPort(addr string) (string, string) {
 		return addr, gatewayPort
 	}
 	return addr[:i], addr[i+1:]
+}
+
+// waitForGatewayReady polls from inside the gateway container until socat is
+// listening. We can't check from the host because the internal network IP is
+// unreachable from outside Docker.
+func (b *Backend) waitForGatewayReady(ctx context.Context, containerID string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	// First wait for the apk + socat install, then check the listening port.
+	// Use nc (netcat) from busybox, available on Alpine by default.
+	checkCmd := fmt.Sprintf(`nc -z 127.0.0.1 %s`, gatewayPort)
+	for time.Now().Before(deadline) {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		execCfg := container.ExecOptions{
+			Cmd: []string{"sh", "-c", checkCmd},
+		}
+		execID, err := b.client.ContainerExecCreate(ctx, containerID, execCfg)
+		if err != nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		if err := b.client.ContainerExecStart(ctx, execID.ID, container.ExecStartOptions{}); err != nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		inspect, err := b.client.ContainerExecInspect(ctx, execID.ID)
+		if err == nil && inspect.ExitCode == 0 {
+			return nil
+		}
+		time.Sleep(1 * time.Second)
+	}
+	return fmt.Errorf("timeout waiting for gateway socat (container=%s)", containerID[:12])
 }
 
 func mergeLabels(base, extra map[string]string) map[string]string {

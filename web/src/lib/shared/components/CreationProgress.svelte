@@ -101,11 +101,16 @@
 			</div>
 			<div class="flex justify-between text-xs text-foreground-faint">
 				<span>{currentMessage}</span>
-				{#if estimatedSecs > 0 && !done}
-					<span>~{formatTime(Math.max(0, estimatedSecs - elapsed))} remaining</span>
-				{:else if done && !error}
-					<span>{formatTime(elapsed)} total</span>
-				{/if}
+				<span class="flex gap-2">
+					{#if !done}
+						<span>{formatTime(elapsed)} elapsed</span>
+					{/if}
+					{#if estimatedSecs > 0 && !done && estimatedSecs - elapsed > 1}
+						<span>&middot; ~{formatTime(Math.max(0, estimatedSecs - elapsed))} remaining</span>
+					{:else if done && !error}
+						<span>{formatTime(elapsed)} total</span>
+					{/if}
+				</span>
 			</div>
 		</div>
 

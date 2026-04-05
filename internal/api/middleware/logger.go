@@ -34,6 +34,12 @@ func (r *statusRecorder) Flush() {
 // Logger logs each HTTP request with method, path, status, and duration.
 func Logger(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Skip noisy endpoints
+		if r.URL.Path == "/health" || r.URL.Path == "/ready" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Skip logging for WebSocket upgrades — they're long-lived connections
 		if strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
 			log.Printf("%s %s (websocket)", r.Method, r.URL.Path)

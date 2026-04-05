@@ -131,9 +131,7 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 		"ZT_WORKSPACE_ID=" + wsID.String(),
 		"ZT_TENANT_ID=" + tenantID.String(),
 	}
-	if o.token != "" {
-		env = append(env, "GITHUB_TOKEN="+o.token, "GH_TOKEN="+o.token)
-	}
+
 	for k, v := range result.Env {
 		env = append(env, k+"="+v)
 	}
@@ -169,9 +167,12 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 
 	cid := handle.ID
 
+	// Install MITM CA cert so TLS through the proxy is trusted
+	o.installCACert(ctx, cid)
+
 	// Configure git
 	emit("configuring_git", "Configuring git credentials...")
-	o.configureGit(ctx, cid)
+	o.configureGit(ctx, cid, internalProxyAddr)
 
 	// Create workspace parent directory
 	o.backend.Exec(ctx, cid, "mkdir -p /workspace")
@@ -266,9 +267,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 		"ZT_WORKSPACE_ID=" + wsID.String(),
 		"ZT_TENANT_ID=" + tenantID.String(),
 	}
-	if o.token != "" {
-		env = append(env, "GITHUB_TOKEN="+o.token, "GH_TOKEN="+o.token)
-	}
+
 	env = append(env, proxyEnv(internalProxyAddr)...)
 
 	handle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
@@ -290,9 +289,12 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 
 	cid := handle.ID
 
+	// Install MITM CA cert so TLS through the proxy is trusted
+	o.installCACert(ctx, cid)
+
 	// Configure git credentials
 	emit("configuring_git", "Configuring git credentials...")
-	o.configureGit(ctx, cid)
+	o.configureGit(ctx, cid, internalProxyAddr)
 	o.backend.Exec(ctx, cid, "mkdir -p /workspace/.cordon")
 
 	// Parallel shallow clone with semaphore
@@ -371,14 +373,14 @@ func (o *Orchestrator) cloneRepos(ctx context.Context, cid string, repos []domai
 		cloneURL := o.cloneURL(repo.URL)
 		log.Printf("[workspace] cloning %s into %s (branch=%s)", repo.URL, cloneDir, repo.Branch)
 
-		cloneCmd := fmt.Sprintf("git clone --branch %s %s %s", repo.Branch, cloneURL, cloneDir)
-		if _, err := o.backend.Exec(ctx, cid, cloneCmd); err != nil {
+		cloneCmd := fmt.Sprintf("git clone --branch %s %s %s 2>&1", repo.Branch, cloneURL, cloneDir)
+		if output, err := o.backend.ExecWithOutput(ctx, cid, cloneCmd); err != nil {
 			if repo.Branch != repo.BaseBranch {
 				log.Printf("[workspace] branch %s not found, cloning %s and creating branch", repo.Branch, repo.BaseBranch)
 				emit("cloning_repo", fmt.Sprintf("Branch %s not found, cloning %s...", repo.Branch, repo.BaseBranch))
-				fallbackCmd := fmt.Sprintf("git clone --branch %s %s %s", repo.BaseBranch, cloneURL, cloneDir)
-				if _, err := o.backend.Exec(ctx, cid, fallbackCmd); err != nil {
-					log.Printf("[workspace] warning: clone of %s failed: %v", repo.URL, err)
+				fallbackCmd := fmt.Sprintf("git clone --branch %s %s %s 2>&1", repo.BaseBranch, cloneURL, cloneDir)
+				if output, err := o.backend.ExecWithOutput(ctx, cid, fallbackCmd); err != nil {
+					log.Printf("[workspace] warning: clone of %s failed: %v\n%s", repo.URL, err, redactToken(output, o.token))
 				} else {
 					checkoutCmd := fmt.Sprintf("cd %s && git checkout -b %s", cloneDir, repo.Branch)
 					if _, err := o.backend.Exec(ctx, cid, checkoutCmd); err != nil {
@@ -386,7 +388,7 @@ func (o *Orchestrator) cloneRepos(ctx context.Context, cid string, repos []domai
 					}
 				}
 			} else {
-				log.Printf("[workspace] warning: clone of %s failed: %v", repo.URL, err)
+				log.Printf("[workspace] warning: clone of %s failed: %v\n%s", repo.URL, err, redactToken(output, o.token))
 			}
 		}
 	}
@@ -434,9 +436,6 @@ func (o *Orchestrator) startServiceContainers(ctx context.Context, primaryName, 
 			"ZT_WORKSPACE_ID=" + wsID.String(),
 			"ZT_TENANT_ID=" + tenantID.String(),
 			"CORDON_SERVICE_REPO=" + shortName,
-		}
-		if o.token != "" {
-			svcEnv = append(svcEnv, "GITHUB_TOKEN="+o.token, "GH_TOKEN="+o.token)
 		}
 		for k, v := range svcResult.Env {
 			svcEnv = append(svcEnv, k+"="+v)
