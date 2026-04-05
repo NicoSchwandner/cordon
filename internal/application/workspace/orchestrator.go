@@ -155,6 +155,9 @@ func (o *Orchestrator) Destroy(ctx context.Context, tenantID, workspaceID uuid.U
 
 	var networkName string
 	for _, h := range handles {
+		if h.Labels["cordon.egress-gateway"] != "" {
+			continue // gateway containers are cleaned up via RemoveProxyAccess
+		}
 		svcFor := h.Labels["cordon.service-for"]
 		if svcFor != "" {
 			log.Printf("[workspace] removing service container for %s (%s)", svcFor, h.ID[:12])
