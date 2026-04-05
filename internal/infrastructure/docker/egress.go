@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -29,10 +28,12 @@ const (
 //
 // Architecture:
 //
-//	[workspace container] --(internal network)--> [gateway] --(bridge network)--> [Cordon proxy]
+//	[workspace container] --(internal network)--> [gateway/haproxy] --(bridge network)--> [Cordon proxy]
 //
-// The gateway runs socat to forward TCP from its internal-network IP to the
-// external proxy address. Returns the gateway's internal address (host:port).
+// The gateway runs haproxy with PROXY protocol v1 so that the Cordon server
+// sees the real workspace container IP, not the Docker NAT address. This is
+// critical on macOS Docker Desktop where all container→host traffic appears
+// from 127.0.0.1 due to the VM NAT layer.
 func (b *Backend) EnsureProxyAccess(ctx context.Context, networkName string, proxyAddr string, labels map[string]string) (string, error) {
 	gwName := gatewayName(networkName)
 
@@ -42,9 +43,6 @@ func (b *Backend) EnsureProxyAccess(ctx context.Context, networkName string, pro
 	if err := b.pullIfMissing(ctx, gatewayImage); err != nil {
 		return "", fmt.Errorf("pulling gateway image: %w", err)
 	}
-
-	// Parse proxy host:port for socat target
-	proxyHost, proxyPort := splitHostPort(proxyAddr)
 
 	// The gateway needs to reach the Cordon server on the host.
 	// Create a non-internal "bridge" network for the gateway's external leg.
@@ -64,22 +62,36 @@ func (b *Backend) EnsureProxyAccess(ctx context.Context, networkName string, pro
 		"cordon.gateway-for-net": networkName,
 	})
 
-	// socat listens on all interfaces inside the gateway and forwards to the proxy.
-	socatCmd := fmt.Sprintf(
-		"socat TCP-LISTEN:%s,fork,reuseaddr TCP:%s:%s",
-		gatewayPort, proxyHost, proxyPort,
-	)
+	// HAProxy config: forward TCP with PROXY protocol v1 so the Cordon server
+	// sees the real workspace container IP, not the Docker NAT address.
+	haproxyCfg := fmt.Sprintf(`defaults
+    mode tcp
+    timeout connect 10s
+    timeout client 1h
+    timeout server 1h
+
+frontend workspace_proxy
+    bind *:%s
+    default_backend cordon_proxy
+
+backend cordon_proxy
+    server cordon %s send-proxy
+`, gatewayPort, proxyAddr)
+
+	gwCmd := fmt.Sprintf(`apk add --no-cache haproxy > /dev/null 2>&1 && mkdir -p /etc/haproxy && cat > /etc/haproxy/haproxy.cfg << 'HAPCFG'
+%sHAPCFG
+exec haproxy -f /etc/haproxy/haproxy.cfg -db`, haproxyCfg)
 
 	resp, err := b.client.ContainerCreate(ctx,
 		&container.Config{
 			Image:  gatewayImage,
 			Labels: gwLabels,
-			Cmd:    []string{"sh", "-c", "apk add --no-cache socat > /dev/null 2>&1 && " + socatCmd},
+			Cmd:    []string{"sh", "-c", gwCmd},
 		},
 		&container.HostConfig{
 			NetworkMode: container.NetworkMode(extNetName),
 			Resources: container.Resources{
-				CPUQuota: 50000,  // 0.5 CPU — gateway is lightweight
+				CPUQuota: 50000,    // 0.5 CPU — gateway is lightweight
 				Memory:   64 << 20, // 64 MB
 			},
 			ExtraHosts: []string{"host.docker.internal:host-gateway"},
@@ -104,22 +116,19 @@ func (b *Backend) EnsureProxyAccess(ctx context.Context, networkName string, pro
 		return "", fmt.Errorf("starting gateway container: %w", err)
 	}
 
-	// Read the gateway's IP on the internal workspace network
+	// Read the gateway's IP on the internal workspace network (used by workspace containers)
 	internalIP, err := b.containerIPOnNetwork(ctx, resp.ID, networkName)
 	if err != nil {
 		b.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		b.client.NetworkRemove(ctx, extNetID.ID)
-		return "", fmt.Errorf("reading gateway IP: %w", err)
+		return "", fmt.Errorf("reading gateway internal IP: %w", err)
 	}
 
 	internalAddr := fmt.Sprintf("%s:%s", internalIP, gatewayPort)
 
-	// Wait for socat to start listening. The gateway runs apk add + socat,
+	// Wait for haproxy to start listening. The gateway runs apk add + haproxy,
 	// which takes a few seconds. Without this, workspace containers may try
 	// to connect before the gateway is ready.
-	//
-	// We check from *inside* the gateway container because the internal network
-	// IP is unreachable from the host.
 	if err := b.waitForGatewayReady(ctx, resp.ID, 60*time.Second); err != nil {
 		log.Printf("[docker] warning: gateway readiness check failed: %v", err)
 	}
@@ -181,21 +190,11 @@ func gatewayName(networkName string) string {
 	return networkName + "-gateway"
 }
 
-func splitHostPort(addr string) (string, string) {
-	i := strings.LastIndex(addr, ":")
-	if i < 0 {
-		return addr, gatewayPort
-	}
-	return addr[:i], addr[i+1:]
-}
-
-// waitForGatewayReady polls from inside the gateway container until socat is
+// waitForGatewayReady polls from inside the gateway container until haproxy is
 // listening. We can't check from the host because the internal network IP is
 // unreachable from outside Docker.
 func (b *Backend) waitForGatewayReady(ctx context.Context, containerID string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
-	// First wait for the apk + socat install, then check the listening port.
-	// Use nc (netcat) from busybox, available on Alpine by default.
 	checkCmd := fmt.Sprintf(`nc -z 127.0.0.1 %s`, gatewayPort)
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
@@ -219,7 +218,7 @@ func (b *Backend) waitForGatewayReady(ctx context.Context, containerID string, t
 		}
 		time.Sleep(1 * time.Second)
 	}
-	return fmt.Errorf("timeout waiting for gateway socat (container=%s)", containerID[:12])
+	return fmt.Errorf("timeout waiting for gateway haproxy (container=%s)", containerID[:12])
 }
 
 func mergeLabels(base, extra map[string]string) map[string]string {

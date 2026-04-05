@@ -99,11 +99,24 @@
 		};
 	});
 
+	// Poll workspace status to detect external changes (reaper suspend, TTL expiry)
+	$effect(() => {
+		if (isCreating) return;
+		const interval = setInterval(async () => {
+			try {
+				workspace = await getWorkspace(data.workspaceId);
+			} catch {
+				// workspace may have been destroyed
+			}
+		}, 10_000);
+		return () => clearInterval(interval);
+	});
+
 	async function handleAction(action: 'suspend' | 'resume') {
 		actionError = '';
 		try {
 			await workspaceAction(data.workspaceId, action);
-			window.location.reload();
+			workspace = await getWorkspace(data.workspaceId);
 		} catch (e) {
 			actionError = e instanceof Error ? e.message : 'Action failed';
 		}

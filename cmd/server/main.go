@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,7 +16,7 @@ import (
 	"github.com/NicoSchwandner/cordon/internal/api/handlers"
 	"github.com/NicoSchwandner/cordon/internal/api/middleware"
 	apiws "github.com/NicoSchwandner/cordon/internal/api/ws"
-	"github.com/NicoSchwandner/cordon/internal/application/audit"
+	auditpkg "github.com/NicoSchwandner/cordon/internal/application/audit"
 	"github.com/NicoSchwandner/cordon/internal/application/ports"
 	"github.com/NicoSchwandner/cordon/internal/application/progress"
 	"github.com/NicoSchwandner/cordon/internal/application/proxy"
@@ -23,6 +24,7 @@ import (
 	"github.com/NicoSchwandner/cordon/internal/domain"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/devcontainer"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/docker"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/proxyproto"
 	gh "github.com/NicoSchwandner/cordon/internal/infrastructure/github"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/postgres"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/sops"
@@ -85,6 +87,10 @@ func main() {
 	}
 	log.Printf("MITM CA ready (%d byte cert)", len(ca.PEM()))
 
+	// Workspace registry — maps gateway IPs to workspace IDs so the CONNECT
+	// handler can attribute MITM traffic to the originating workspace.
+	wsRegistry := workspace.NewMemoryRegistry()
+
 	// Workspace orchestrator (ComputeBackend → Orchestrator)
 	var orchestrator *workspace.Orchestrator
 	dockerBackend, err := docker.NewBackend()
@@ -119,11 +125,13 @@ func main() {
 			Progress: progressStore,
 			Egress:   egressPolicy,
 			CAPem:    ca.PEM(),
+			Registry: wsRegistry,
 		})
 	}
 
 	// Application services
-	auditService := audit.NewService(auditStore)
+	auditBroadcast := auditpkg.NewBroadcaster()
+	auditService := auditpkg.NewService(auditStore)
 	swapper := proxy.NewSecretSwapper(vault)
 	egress := proxy.NewEgressChecker([]string{
 		"github.com", "*.github.com",
@@ -140,6 +148,7 @@ func main() {
 		Approver:        approvalStore,
 		Egress:          egress,
 		ApprovalTimeout: 5 * time.Minute,
+		Broadcast:       auditBroadcast,
 	})
 
 	// Auth
@@ -226,13 +235,13 @@ func main() {
 	}
 	mux.Handle("/ws/agent/", authMW(apiws.NewAgentWSHandler(agentRegistry)))
 	mux.Handle("/ws/approvals", authMW(apiws.NewApprovalWSHandler()))
-	mux.Handle("/ws/audit", authMW(apiws.NewAuditWSHandler()))
+	mux.Handle("/ws/audit", authMW(apiws.NewAuditWSHandler(auditBroadcast)))
 
 	// HTTP CONNECT handler — lets workspace containers route git/curl/apt through
 	// the proxy via standard http_proxy/https_proxy env vars, same egress path as
 	// explicit /api/proxy/http calls. Sits before Logger/Recovery because CONNECT
 	// tunnels hijack the connection for raw TCP — they're not request/response.
-	connectHandler := handlers.NewConnectHandler(egress, pipeline, ca, tenantID)
+	connectHandler := handlers.NewConnectHandler(egress, pipeline, ca, tenantID, wsRegistry)
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodConnect {
 			connectHandler.ServeHTTP(w, r)
@@ -262,8 +271,17 @@ func main() {
 		server.Shutdown(shutCtx)
 	}()
 
+	// Listen with PROXY protocol v1 support. Gateway containers use haproxy
+	// with send-proxy to report the real workspace container IP. Direct browser
+	// connections (no PROXY header) pass through unchanged.
+	ln, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	ppListener := proxyproto.NewListener(ln)
+
 	log.Printf("Cordon server starting on :%s (auth=%s, workspaces=%v)", port, authMode, orchestrator != nil)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := server.Serve(ppListener); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
 }

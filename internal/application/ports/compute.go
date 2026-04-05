@@ -71,8 +71,8 @@ type ComputeBackend interface {
 	RemoveNetwork(ctx context.Context, id string) error
 
 	// Egress enforcement — network-level isolation managed outside the container.
-	// EnsureProxyAccess makes the Cordon proxy reachable from an isolated network
-	// and returns the internal address workspace containers should use.
+	// EnsureProxyAccess makes the Cordon proxy reachable from an isolated network.
+	// The gateway should use PROXY protocol so the server sees real client IPs.
 	EnsureProxyAccess(ctx context.Context, networkName string, proxyAddr string, labels map[string]string) (internalProxyAddr string, err error)
 	// RemoveProxyAccess cleans up resources created by EnsureProxyAccess.
 	RemoveProxyAccess(ctx context.Context, networkName string) error

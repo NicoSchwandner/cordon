@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"regexp"
 	"strings"
 	"time"
 
@@ -126,7 +127,32 @@ func (o *Orchestrator) createIsolatedNetwork(ctx context.Context, networkName st
 		o.backend.RemoveNetwork(ctx, networkName)
 		return "", fmt.Errorf("setting up proxy access: %w", err)
 	}
+
 	return proxyAddr, nil
+}
+
+// registerWorkspaceIP reads the workspace container's network IP and registers it
+// in the workspace registry so the CONNECT handler can attribute MITM traffic.
+// The gateway uses PROXY protocol to report the real client IP, so we register
+// the workspace container's IP (not the gateway's).
+func (o *Orchestrator) registerWorkspaceIP(ctx context.Context, containerID string, wsID uuid.UUID) {
+	if o.registry == nil {
+		return
+	}
+	output, err := o.backend.ExecWithOutput(ctx, containerID, "hostname -I")
+	if err != nil {
+		log.Printf("[workspace] warning: could not read container IP for registry: %v", err)
+		return
+	}
+	// Extract IP from output — Docker exec may include binary stream headers,
+	// so we match an IPv4 pattern rather than trusting field splitting.
+	ip := extractIPv4(output)
+	if ip == "" {
+		log.Printf("[workspace] warning: could not parse container IP from output %q for workspace %s", output, wsID.String()[:8])
+		return
+	}
+	log.Printf("[workspace] registering container IP %s → workspace %s", ip, wsID.String()[:8])
+	o.registry.Register(ip, wsID)
 }
 
 // proxyEnv returns env vars that configure standard HTTP proxy settings,
@@ -279,6 +305,14 @@ func baseLabels(tenantID, wsID uuid.UUID, name string, now time.Time, maxLifetim
 		"cordon.created":   now.Format(time.RFC3339),
 		"cordon.expires":   now.Add(maxLifetime).Format(time.RFC3339),
 	}
+}
+
+var ipv4Re = regexp.MustCompile(`\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b`)
+
+// extractIPv4 finds the first IPv4 address in a string, ignoring any
+// binary noise (e.g. Docker multiplexed stream headers).
+func extractIPv4(s string) string {
+	return ipv4Re.FindString(s)
 }
 
 func sanitizeName(name string) string {

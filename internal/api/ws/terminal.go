@@ -7,10 +7,13 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/NicoSchwandner/cordon/internal/api/middleware"
+	"github.com/NicoSchwandner/cordon/internal/application/audit"
 	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 	"nhooyr.io/websocket"
 )
 
@@ -162,10 +165,12 @@ func (h *ApprovalWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // AuditWSHandler streams audit entries in real-time.
-type AuditWSHandler struct{}
+type AuditWSHandler struct {
+	broadcast *audit.Broadcaster
+}
 
-func NewAuditWSHandler() *AuditWSHandler {
-	return &AuditWSHandler{}
+func NewAuditWSHandler(broadcast *audit.Broadcaster) *AuditWSHandler {
+	return &AuditWSHandler{broadcast: broadcast}
 }
 
 func (h *AuditWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -186,5 +191,69 @@ func (h *AuditWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 
-	<-ctx.Done()
+	// Drain reads so the connection stays alive (WebSocket requires it)
+	go func() {
+		for {
+			if _, _, err := conn.Read(ctx); err != nil {
+				cancel()
+				return
+			}
+		}
+	}()
+
+	ch := h.broadcast.Subscribe()
+	defer h.broadcast.Unsubscribe(ch)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case entry := <-ch:
+			// Only send entries for this tenant
+			if entry.TenantID != tenantID {
+				continue
+			}
+			data, err := json.Marshal(auditEntryJSON(entry))
+			if err != nil {
+				continue
+			}
+			if err := conn.Write(ctx, websocket.MessageText, data); err != nil {
+				return
+			}
+		}
+	}
+}
+
+// auditEntryJSON converts a domain audit entry to the same JSON shape the
+// REST API returns, so the frontend can use one type for both.
+type auditEntryWire struct {
+	ID          string `json:"id"`
+	TenantID    string `json:"tenant_id"`
+	WorkspaceID string `json:"workspace_id"`
+	Timestamp   string `json:"timestamp"`
+	Tier        int    `json:"tier"`
+	TierName    string `json:"tier_name"`
+	Operation   string `json:"operation"`
+	Target      string `json:"target"`
+	Caller      string `json:"caller"`
+	Decision    string `json:"decision"`
+	DurationMs  int64  `json:"duration_ms"`
+	Detail      string `json:"detail"`
+}
+
+func auditEntryJSON(e domain.AuditEntry) auditEntryWire {
+	return auditEntryWire{
+		ID:          e.ID.String(),
+		TenantID:    e.TenantID.String(),
+		WorkspaceID: e.WorkspaceID.String(),
+		Timestamp:   e.Timestamp.Format(time.RFC3339Nano),
+		Tier:        int(e.Tier),
+		TierName:    e.Tier.String(),
+		Operation:   e.Operation,
+		Target:      e.Target,
+		Caller:      e.Caller,
+		Decision:    string(e.Decision),
+		DurationMs:  e.DurationMs,
+		Detail:      e.Detail,
+	}
 }

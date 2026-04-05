@@ -171,6 +171,9 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 
 	cid := handle.ID
 
+	// Register this container's IP so the CONNECT handler can attribute traffic
+	o.registerWorkspaceIP(ctx, cid, wsID)
+
 	// Install MITM CA cert so TLS through the proxy is trusted
 	o.installCACert(ctx, cid)
 
@@ -292,6 +295,9 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 	}
 
 	cid := handle.ID
+
+	// Register this container's IP so the CONNECT handler can attribute traffic
+	o.registerWorkspaceIP(ctx, cid, wsID)
 
 	// Install MITM CA cert so TLS through the proxy is trusted
 	o.installCACert(ctx, cid)

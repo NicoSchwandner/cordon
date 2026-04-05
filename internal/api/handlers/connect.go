@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/NicoSchwandner/cordon/internal/application/ports"
 	"github.com/NicoSchwandner/cordon/internal/application/proxy"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/tlsca"
 )
@@ -29,15 +30,17 @@ type ConnectHandler struct {
 	pipeline        *proxy.Pipeline
 	ca              *tlsca.CA
 	defaultTenantID uuid.UUID
+	registry        ports.WorkspaceRegistry
 	client          *http.Client
 }
 
-func NewConnectHandler(egress *proxy.EgressChecker, pipeline *proxy.Pipeline, ca *tlsca.CA, defaultTenantID uuid.UUID) *ConnectHandler {
+func NewConnectHandler(egress *proxy.EgressChecker, pipeline *proxy.Pipeline, ca *tlsca.CA, defaultTenantID uuid.UUID, registry ports.WorkspaceRegistry) *ConnectHandler {
 	return &ConnectHandler{
 		egress:          egress,
 		pipeline:        pipeline,
 		ca:              ca,
 		defaultTenantID: defaultTenantID,
+		registry:        registry,
 		client: &http.Client{
 			Transport: &http.Transport{
 				// Force HTTP/1.1 for upstream requests. The MITM connection back
@@ -76,6 +79,17 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve workspace ID from the real client IP (reported via PROXY protocol
+	// by the gateway's haproxy, parsed by the proxyproto listener wrapper).
+	remoteIP := stripPort(r.RemoteAddr)
+	wsID := uuid.Nil
+	if h.registry != nil {
+		wsID = h.registry.Lookup(remoteIP)
+		if wsID == uuid.Nil {
+			log.Printf("[connect] no workspace found for remote IP %s (raw: %s)", remoteIP, r.RemoteAddr)
+		}
+	}
+
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
 
 	cert, err := h.ca.CertForHost(hostname)
@@ -107,7 +121,7 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if err := h.proxyRequest(tlsConn, req, hostname, host); err != nil {
+		if err := h.proxyRequest(tlsConn, req, hostname, host, wsID); err != nil {
 			log.Printf("[connect] proxy error for %s: %v", host, err)
 			return
 		}
@@ -116,7 +130,7 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // proxyRequest runs a single intercepted HTTP request through the pipeline
 // and writes the upstream response back to the client's TLS connection.
-func (h *ConnectHandler) proxyRequest(tlsConn *tls.Conn, req *http.Request, hostname, hostPort string) error {
+func (h *ConnectHandler) proxyRequest(tlsConn *tls.Conn, req *http.Request, hostname, hostPort string, wsID uuid.UUID) error {
 	log.Printf("[connect] %s %s %s", req.Method, hostname, req.URL.RequestURI())
 
 	// Handle Expect: 100-continue — git uses this for POST /git-upload-pack.
@@ -145,14 +159,15 @@ func (h *ConnectHandler) proxyRequest(tlsConn *tls.Conn, req *http.Request, host
 
 	// Build proxy request and run through the pipeline
 	proxyReq := proxy.ProxyRequest{
-		QueryType: proxy.QueryTypeHTTP,
-		Method:    req.Method,
-		Path:      req.URL.RequestURI(),
-		Host:      hostname,
-		Headers:   headers,
-		Body:      body,
-		TenantID:  h.defaultTenantID,
-		Caller:    "workspace",
+		QueryType:   proxy.QueryTypeHTTP,
+		Method:      req.Method,
+		Path:        req.URL.RequestURI(),
+		Host:        hostname,
+		Headers:     headers,
+		Body:        body,
+		TenantID:    h.defaultTenantID,
+		WorkspaceID: wsID,
+		Caller:      "workspace",
 	}
 
 	resp := h.pipeline.Process(req.Context(), proxyReq)

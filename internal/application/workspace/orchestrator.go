@@ -25,6 +25,7 @@ type Orchestrator struct {
 	progress *progress.Store       // optional progress event emitter
 	egress   domain.EgressPolicy   // network-level egress enforcement
 	caPem    []byte                // MITM CA cert PEM for container trust store injection
+	registry ports.WorkspaceRegistry // maps gateway IPs to workspace IDs
 }
 
 // Compile-time check that Orchestrator satisfies WorkspaceService.
@@ -38,7 +39,8 @@ type OrchestratorConfig struct {
 	GitHost  ports.GitHostClient
 	Progress *progress.Store
 	Egress   domain.EgressPolicy
-	CAPem    []byte // MITM CA certificate to inject into containers
+	CAPem    []byte                  // MITM CA certificate to inject into containers
+	Registry ports.WorkspaceRegistry // maps gateway IPs to workspace IDs for CONNECT handler
 }
 
 // NewOrchestrator creates a workspace orchestrator.
@@ -51,6 +53,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		progress: cfg.Progress,
 		egress:   cfg.Egress,
 		caPem:    cfg.CAPem,
+		registry: cfg.Registry,
 	}
 	if o.egress.Enabled {
 		log.Printf("[workspace] network-level egress enforcement enabled (proxy=%s)", o.egress.ProxyAddr)
@@ -137,7 +140,13 @@ func (o *Orchestrator) Resume(ctx context.Context, tenantID, workspaceID uuid.UU
 	if err != nil {
 		return err
 	}
-	return o.backend.UnpauseContainer(ctx, handle.ID)
+	if err := o.backend.UnpauseContainer(ctx, handle.ID); err != nil {
+		return err
+	}
+	// Re-inject CA cert — the server may have restarted (new CA) while the
+	// workspace was suspended.
+	o.installCACert(ctx, handle.ID)
+	return nil
 }
 
 func (o *Orchestrator) Destroy(ctx context.Context, tenantID, workspaceID uuid.UUID) error {
@@ -349,6 +358,7 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 		return fmt.Errorf("starting workspace container: %w", err)
 	}
 
+	o.registerWorkspaceIP(ctx, newHandle.ID, newWSID)
 	o.installCACert(ctx, newHandle.ID)
 	emit("cloning_repo", fmt.Sprintf("Cloning %s...", shortName))
 	o.configureGit(ctx, newHandle.ID, internalProxyAddr)

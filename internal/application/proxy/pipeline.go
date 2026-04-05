@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/NicoSchwandner/cordon/internal/application/audit"
 	"github.com/NicoSchwandner/cordon/internal/application/ports"
 	"github.com/NicoSchwandner/cordon/internal/domain"
 )
@@ -19,6 +20,7 @@ type Pipeline struct {
 	egress         *EgressChecker
 	overrides      []ports.TierOverride
 	approvalTimeout time.Duration
+	broadcast      *audit.Broadcaster
 }
 
 type PipelineConfig struct {
@@ -30,6 +32,7 @@ type PipelineConfig struct {
 	Egress          *EgressChecker
 	Overrides       []ports.TierOverride
 	ApprovalTimeout time.Duration
+	Broadcast       *audit.Broadcaster
 }
 
 func NewPipeline(cfg PipelineConfig) *Pipeline {
@@ -46,6 +49,7 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		egress:         cfg.Egress,
 		overrides:      cfg.Overrides,
 		approvalTimeout: timeout,
+		broadcast:      cfg.Broadcast,
 	}
 }
 
@@ -232,6 +236,9 @@ func (p *Pipeline) auditEntry(req ProxyRequest, tier domain.Tier, decision domai
 func (p *Pipeline) writeAudit(ctx context.Context, entry domain.AuditEntry) {
 	if p.audit != nil {
 		_ = p.audit.Write(ctx, entry) // best-effort; don't block request on audit failure
+	}
+	if p.broadcast != nil {
+		p.broadcast.Publish(entry)
 	}
 }
 
