@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { AuditEntry } from '$lib/shared/api/types';
+	import { TIER_NAMES } from '$lib/shared/api/types';
 	import { connectAuditWS } from '$lib/shared/api/websocket';
-	import TierBadge from '$lib/shared/components/TierBadge.svelte';
 	import DecisionBadge from '$lib/shared/components/DecisionBadge.svelte';
 
 	let { workspaceId = '' }: { workspaceId?: string } = $props();
@@ -29,6 +29,58 @@
 		}
 		paused = !paused;
 	}
+
+	const DECISION_ICONS: Record<string, string> = {
+		allowed: '✓',
+		denied: '✗',
+		blocked: '⊘',
+		pending_approval: '⏳'
+	};
+
+	const DECISION_LINE_COLORS: Record<string, string> = {
+		allowed: 'border-l-success-text',
+		denied: 'border-l-danger-text',
+		blocked: 'border-l-danger-text',
+		pending_approval: 'border-l-warning-text'
+	};
+
+	function summarize(entry: AuditEntry): string {
+		const op = entry.operation;
+		const target = entry.target;
+		const detail = entry.detail;
+
+		if (op.startsWith('HTTP:')) {
+			const method = op.replace('HTTP:', '');
+			// detail is "METHOD /path", target is "host/path"
+			// Extract just the path from target to avoid "GET GET /path"
+			const path = target.includes('/') ? '/' + target.split('/').slice(1).join('/') : target;
+			return `${method} ${path || '/'}`;
+		}
+
+		if (op.startsWith('SQL:') || op === 'SQL') {
+			return detail || target;
+		}
+
+		if (detail) return `${op} → ${detail}`;
+		return `${op} → ${target}`;
+	}
+
+	function timeAgo(ts: string): string {
+		const diff = Math.floor((Date.now() - new Date(ts).getTime()) / 1000);
+		if (diff < 5) return 'now';
+		if (diff < 60) return `${diff}s ago`;
+		if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
+		return `${Math.floor(diff / 3600)}h ago`;
+	}
+
+	function hostFrom(entry: AuditEntry): string {
+		// target is "host/path" for HTTP entries (no scheme)
+		const target = entry.target;
+		if (target.includes('/')) return target.split('/')[0];
+		// If no slash, the whole target might be a host
+		if (target.includes('.')) return target;
+		return '';
+	}
 </script>
 
 <div class="flex h-full flex-col">
@@ -49,15 +101,26 @@
 			<p class="p-4 text-center text-sm text-foreground-faint">No operations yet</p>
 		{:else}
 			{#each entries as entry (entry.id)}
-				<div class="animate-fade-in border-b border-border-subtle px-3 py-2">
-					<div class="flex items-center gap-2">
-						<TierBadge tier={entry.tier} />
-						<DecisionBadge decision={entry.decision} />
-						<span class="text-xs text-foreground-faint">{entry.caller}</span>
+				{@const summary = summarize(entry)}
+				{@const host = hostFrom(entry)}
+				{@const lineColor = DECISION_LINE_COLORS[entry.decision] ?? 'border-l-border'}
+				<div class="animate-fade-in border-b border-border-subtle border-l-2 {lineColor} px-3 py-2">
+					<div class="flex items-center justify-between gap-2">
+						<span class="truncate font-mono text-xs font-medium text-foreground" title={entry.detail || entry.target}>
+							{DECISION_ICONS[entry.decision] ?? '•'} {summary}
+						</span>
+						<span class="shrink-0 text-[10px] text-foreground-faint">{timeAgo(entry.timestamp)}</span>
 					</div>
-					<p class="mt-1 truncate font-mono text-xs text-foreground-tertiary" title={entry.detail}>
-						{entry.operation}: {entry.detail || entry.target}
-					</p>
+					<div class="mt-0.5 flex items-center gap-2">
+						<DecisionBadge decision={entry.decision} />
+						<span class="text-[10px] text-foreground-faint">{TIER_NAMES[entry.tier] ?? `T${entry.tier}`}</span>
+						{#if host}
+							<span class="text-[10px] text-foreground-faint">→ {host}</span>
+						{/if}
+						{#if entry.duration_ms > 0}
+							<span class="text-[10px] text-foreground-faint">{entry.duration_ms}ms</span>
+						{/if}
+					</div>
 				</div>
 			{/each}
 		{/if}
