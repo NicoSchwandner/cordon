@@ -48,14 +48,21 @@ func (ps *PersistentService) Create(ctx context.Context, tenantID uuid.UUID, con
 }
 
 func (ps *PersistentService) Get(ctx context.Context, tenantID, workspaceID uuid.UUID) (domain.Workspace, error) {
-	// Try Docker first — gives live container state and enriched investigation data.
+	// Check DB first — if status is "creating", the container may already be
+	// running but postCreateCommand/cloning is still in progress. Return the
+	// DB status so the frontend shows the progress view, not the terminal.
+	dbWS, dbErr := ps.store.Get(ctx, tenantID, workspaceID)
+	if dbErr == nil && dbWS.Status == domain.WorkspaceCreating {
+		return dbWS, nil
+	}
+
+	// Try Docker for live container state and enriched investigation data.
 	ws, err := ps.inner.Get(ctx, tenantID, workspaceID)
 	if err == nil {
 		return ws, nil
 	}
 
-	// Fall back to DB for workspaces in "creating" state or recently destroyed.
-	dbWS, dbErr := ps.store.Get(ctx, tenantID, workspaceID)
+	// Fall back to DB for recently destroyed workspaces or other states.
 	if dbErr != nil {
 		if errors.Is(dbErr, ports.ErrWorkspaceNotFound) {
 			return domain.Workspace{}, err // return original Docker error
