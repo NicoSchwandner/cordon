@@ -344,7 +344,7 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 		"ZT_WORKSPACE_ID=" + newWSID.String(),
 		"ZT_TENANT_ID=" + tenantID.String(),
 	}
-	for k, v := range result.Env {
+	for k, v := range o.sanitizeEnv(ctx, result.Env) {
 		env = append(env, k+"="+v)
 	}
 	env = append(env, proxyEnv(internalProxyAddr)...)

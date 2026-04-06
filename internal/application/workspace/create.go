@@ -131,13 +131,13 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 		labels["cordon.workspace-folder"] = "/workspace"
 	}
 
-	// Environment
+	// Environment — sanitize to replace real secrets with placeholders
 	env := []string{
 		"ZT_WORKSPACE_ID=" + wsID.String(),
 		"ZT_TENANT_ID=" + tenantID.String(),
 	}
 
-	for k, v := range result.Env {
+	for k, v := range o.sanitizeEnv(ctx, result.Env) {
 		env = append(env, k+"="+v)
 	}
 	env = append(env, proxyEnv(internalProxyAddr)...)
@@ -450,7 +450,7 @@ func (o *Orchestrator) startServiceContainers(ctx context.Context, primaryName, 
 			"ZT_TENANT_ID=" + tenantID.String(),
 			"CORDON_SERVICE_REPO=" + shortName,
 		}
-		for k, v := range svcResult.Env {
+		for k, v := range o.sanitizeEnv(ctx, svcResult.Env) {
 			svcEnv = append(svcEnv, k+"="+v)
 		}
 

@@ -174,6 +174,40 @@ func proxyEnv(internalProxyAddr string) []string {
 	}
 }
 
+// sanitizeEnv replaces real secret values in env vars with their placeholder
+// equivalents. This prevents real credentials from entering containers when
+// devcontainer.json resolves ${localEnv:VAR} from the server's environment.
+func (o *Orchestrator) sanitizeEnv(ctx context.Context, env map[string]string) map[string]string {
+	if o.vault == nil {
+		return env
+	}
+	refs, err := o.vault.ListRefs(ctx, o.tenantID)
+	if err != nil || len(refs) == 0 {
+		return env
+	}
+
+	// Build real→placeholder reverse map
+	reverse := make(map[string]string, len(refs))
+	for _, ref := range refs {
+		real, err := o.vault.Resolve(ctx, o.tenantID, ref.Placeholder)
+		if err != nil {
+			continue
+		}
+		reverse[real] = ref.Placeholder
+	}
+
+	sanitized := make(map[string]string, len(env))
+	for k, v := range env {
+		for real, placeholder := range reverse {
+			if strings.Contains(v, real) {
+				v = strings.ReplaceAll(v, real, placeholder)
+			}
+		}
+		sanitized[k] = v
+	}
+	return sanitized
+}
+
 // githubPlaceholder returns the placeholder string for the GITHUB_TOKEN secret.
 func (o *Orchestrator) githubPlaceholder(ctx context.Context) (string, error) {
 	if o.vault == nil {
