@@ -18,13 +18,14 @@ import (
 // with devcontainer building, GitHub operations, and progress reporting.
 type Orchestrator struct {
 	backend  ports.ComputeBackend
-	builder  ports.ImageBuilder    // nil = bare containers only
-	token    string                // GitHub token for authenticated git operations
-	gitUser  *ports.GitIdentity    // resolved from git host API at startup
-	gitHost  ports.GitHostClient   // git hosting platform client (nil-safe)
-	progress *progress.Store       // optional progress event emitter
-	egress   domain.EgressPolicy   // network-level egress enforcement
-	caPem    []byte                // MITM CA cert PEM for container trust store injection
+	builder  ports.ImageBuilder      // nil = bare containers only
+	vault    ports.SecretVault       // secret vault for placeholder lookup
+	tenantID uuid.UUID               // tenant for vault lookups
+	gitUser  *ports.GitIdentity      // resolved from git host API at startup
+	gitHost  ports.GitHostClient     // git hosting platform client (nil-safe)
+	progress *progress.Store         // optional progress event emitter
+	egress   domain.EgressPolicy     // network-level egress enforcement
+	caPem    []byte                  // MITM CA cert PEM for container trust store injection
 	registry ports.WorkspaceRegistry // maps gateway IPs to workspace IDs
 }
 
@@ -35,7 +36,8 @@ var _ ports.WorkspaceService = (*Orchestrator)(nil)
 type OrchestratorConfig struct {
 	Backend  ports.ComputeBackend
 	Builder  ports.ImageBuilder
-	Token    string
+	Vault    ports.SecretVault       // secret vault for placeholder/value lookup
+	TenantID uuid.UUID              // tenant for vault lookups
 	GitHost  ports.GitHostClient
 	Progress *progress.Store
 	Egress   domain.EgressPolicy
@@ -48,7 +50,8 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	o := &Orchestrator{
 		backend:  cfg.Backend,
 		builder:  cfg.Builder,
-		token:    cfg.Token,
+		vault:    cfg.Vault,
+		tenantID: cfg.TenantID,
 		gitHost:  cfg.GitHost,
 		progress: cfg.Progress,
 		egress:   cfg.Egress,
@@ -311,7 +314,8 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 
 	defaultBranch := o.resolveDefaultBranch(repoURL)
 	emit("building_image", fmt.Sprintf("Building devcontainer for %s...", shortName))
-	result, err := o.builder.Build(ctx, repoURL, defaultBranch, o.token, "")
+	activateToken, _ := o.githubToken(ctx)
+	result, err := o.builder.Build(ctx, repoURL, defaultBranch, activateToken, "")
 	if err != nil {
 		return fmt.Errorf("building devcontainer for %s: %w", shortName, err)
 	}

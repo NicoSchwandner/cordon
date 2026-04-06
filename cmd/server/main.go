@@ -61,19 +61,21 @@ func main() {
 	vault.AddSecret(tenantID, "API_KEY", "cordon-placeholder-api-key", envOr("REAL_API_KEY", "sk-real-key-12345"))
 
 	// Devcontainer builder (optional — needs `devcontainer` CLI on PATH)
-	githubToken := os.Getenv("GITHUB_TOKEN")
 	var dcBuilder *devcontainer.Builder
 	dcBuilder, err = devcontainer.NewBuilder()
 	if err != nil {
 		log.Printf("WARNING: devcontainer CLI not available, repo-based workspaces disabled: %v", err)
 	}
-	if githubToken != "" {
+
+	// GitHub token — read from env var for backward compatibility, register as secret.
+	// Users can also register/update via POST /api/secrets at runtime.
+	if githubToken := os.Getenv("GITHUB_TOKEN"); githubToken != "" {
 		log.Printf("GITHUB_TOKEN configured — private repo cloning enabled")
-		vault.AddSecret(tenantID, "GITHUB_TOKEN", "cordon-placeholder-github-token", githubToken)
+		vault.AddSecret(tenantID, "GITHUB_TOKEN", "PLACEHOLDER_GITHUB_TOKEN", githubToken)
 	}
 
 	// GitHub API client (shared across provider + handlers)
-	ghClient := gh.NewClient(githubToken)
+	ghClient := gh.NewClient(os.Getenv("GITHUB_TOKEN"))
 
 	// Progress tracking
 	timingStore := progress.NewTimingStore("data/build-timings.json")
@@ -120,7 +122,8 @@ func main() {
 		orchestrator = workspace.NewOrchestrator(workspace.OrchestratorConfig{
 			Backend:  dockerBackend,
 			Builder:  builder,
-			Token:    githubToken,
+			Vault:    vault,
+			TenantID: tenantID,
 			GitHost:  gitHost,
 			Progress: progressStore,
 			Egress:   egressPolicy,
@@ -185,11 +188,12 @@ func main() {
 	}
 
 	// Handlers
+	agentRegistry := apiws.NewAgentRegistry()
 	healthHandler := handlers.NewHealthHandler(pool)
 	proxyHandler := handlers.NewProxyHandler(pipeline)
 	auditHandler := handlers.NewAuditHandler(auditService)
 	approvalHandler := handlers.NewApprovalHandler(approvalStore)
-	workspaceHandler := handlers.NewWorkspaceHandler(wsService, progressStore, lifecycleMgr, lifecycleMgr)
+	workspaceHandler := handlers.NewWorkspaceHandler(wsService, progressStore, lifecycleMgr, lifecycleMgr, agentRegistry)
 	secretHandler := handlers.NewSecretHandler(vault)
 
 	githubHandler := handlers.NewGitHubHandler(ghClient)
@@ -237,7 +241,6 @@ func main() {
 	mux.Handle("POST /api/workspaces/{id}/{action}", authMW(http.HandlerFunc(workspaceHandler.Action)))
 
 	// WebSocket endpoints
-	agentRegistry := apiws.NewAgentRegistry()
 	if orchestrator != nil {
 		terminalHandler := apiws.NewTerminalHandler(orchestrator, lifecycleMgr)
 		mux.Handle("/ws/terminal/", authMW(terminalHandler))

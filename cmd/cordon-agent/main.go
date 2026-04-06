@@ -7,6 +7,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,7 +16,11 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
+	"time"
+
+	"nhooyr.io/websocket"
 )
 
 func main() {
@@ -197,25 +202,144 @@ func runDaemon() {
 
 	fmt.Fprintf(os.Stderr, "cordon-agent: connecting to %s\n", wsURL)
 
-	// The daemon connects to the Cordon server's WebSocket endpoint
-	// and waits for exec requests. For now, it uses a simple reconnect loop.
+	backoff := time.Second
+	maxBackoff := 30 * time.Second
+
 	for {
-		if err := connectAndServe(wsURL); err != nil {
-			fmt.Fprintf(os.Stderr, "cordon-agent: connection error: %v, reconnecting...\n", err)
+		err := connectAndServe(wsURL)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "cordon-agent: connection error: %v, reconnecting in %s...\n", err, backoff)
 		}
-		// Simple backoff
-		select {}
+		time.Sleep(backoff)
+		backoff = min(backoff*2, maxBackoff)
 	}
 }
 
+// execRequestMsg matches the server's exec request protocol.
+type execRequestMsg struct {
+	ID      string   `json:"id"`
+	Type    string   `json:"type"`
+	Cmd     []string `json:"cmd"`
+	WorkDir string   `json:"workdir,omitempty"`
+}
+
+// execResponseMsg is sent back to the server for each output chunk or exit.
+type execResponseMsg struct {
+	ID   string `json:"id"`
+	Type string `json:"type"` // "stdout", "stderr", "exit"
+	Data string `json:"data,omitempty"`
+	Code int    `json:"code,omitempty"`
+}
+
 // connectAndServe establishes a WebSocket connection and processes exec requests.
-// This is a placeholder that will be fully implemented when the server-side
-// WebSocket relay is wired up. For now, the exec routing works via the HTTP
-// exec API (server-side docker exec), which doesn't need the daemon.
 func connectAndServe(wsURL string) error {
-	// TODO: implement WebSocket-based exec relay for streaming.
-	// For now, the exec API uses docker exec directly (Phase 2 approach).
-	// The daemon will be activated when we add streaming support.
-	fmt.Fprintf(os.Stderr, "cordon-agent: daemon mode ready (WebSocket relay pending)\n")
-	select {} // block forever
+	ctx := context.Background()
+
+	conn, _, err := websocket.Dial(ctx, wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("dial: %w", err)
+	}
+	defer conn.CloseNow()
+
+	// Disable read limit — exec output can be large
+	conn.SetReadLimit(-1)
+
+	fmt.Fprintf(os.Stderr, "cordon-agent: connected, waiting for exec requests\n")
+
+	for {
+		_, data, err := conn.Read(ctx)
+		if err != nil {
+			return fmt.Errorf("read: %w", err)
+		}
+
+		var req execRequestMsg
+		if err := json.Unmarshal(data, &req); err != nil {
+			fmt.Fprintf(os.Stderr, "cordon-agent: invalid message: %v\n", err)
+			continue
+		}
+
+		if req.Type != "exec" {
+			fmt.Fprintf(os.Stderr, "cordon-agent: unknown message type: %s\n", req.Type)
+			continue
+		}
+
+		go handleExec(ctx, conn, req)
+	}
+}
+
+// handleExec runs a command and streams stdout/stderr back over the WebSocket.
+func handleExec(ctx context.Context, conn *websocket.Conn, req execRequestMsg) {
+	var mu sync.Mutex // serialize writes to the shared connection
+	send := func(msg execResponseMsg) {
+		data, err := json.Marshal(msg)
+		if err != nil {
+			return
+		}
+		mu.Lock()
+		conn.Write(ctx, websocket.MessageText, data)
+		mu.Unlock()
+	}
+
+	if len(req.Cmd) == 0 {
+		send(execResponseMsg{ID: req.ID, Type: "stderr", Data: "empty command\n"})
+		send(execResponseMsg{ID: req.ID, Type: "exit", Code: 1})
+		return
+	}
+
+	cmd := exec.CommandContext(ctx, req.Cmd[0], req.Cmd[1:]...)
+	if req.WorkDir != "" {
+		cmd.Dir = req.WorkDir
+	}
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		send(execResponseMsg{ID: req.ID, Type: "stderr", Data: fmt.Sprintf("stdout pipe: %v\n", err)})
+		send(execResponseMsg{ID: req.ID, Type: "exit", Code: 1})
+		return
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		send(execResponseMsg{ID: req.ID, Type: "stderr", Data: fmt.Sprintf("stderr pipe: %v\n", err)})
+		send(execResponseMsg{ID: req.ID, Type: "exit", Code: 1})
+		return
+	}
+
+	if err := cmd.Start(); err != nil {
+		send(execResponseMsg{ID: req.ID, Type: "stderr", Data: fmt.Sprintf("start: %v\n", err)})
+		send(execResponseMsg{ID: req.ID, Type: "exit", Code: 1})
+		return
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	stream := func(r io.Reader, msgType string) {
+		defer wg.Done()
+		buf := make([]byte, 4096)
+		for {
+			n, err := r.Read(buf)
+			if n > 0 {
+				send(execResponseMsg{ID: req.ID, Type: msgType, Data: string(buf[:n])})
+			}
+			if err != nil {
+				return
+			}
+		}
+	}
+
+	go stream(stdout, "stdout")
+	go stream(stderr, "stderr")
+
+	wg.Wait()
+
+	exitCode := 0
+	if err := cmd.Wait(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			exitCode = exitErr.ExitCode()
+		} else {
+			exitCode = 1
+		}
+	}
+
+	send(execResponseMsg{ID: req.ID, Type: "exit", Code: exitCode})
 }

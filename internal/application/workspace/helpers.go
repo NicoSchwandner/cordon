@@ -39,10 +39,10 @@ func (o *Orchestrator) findPrimaryContainer(ctx context.Context, tenantID, works
 }
 
 func (o *Orchestrator) configureGit(ctx context.Context, containerID, proxyAddr string) {
-	if o.token != "" {
-		// Credential helper returns a placeholder — the MITM proxy swaps it
-		// with the real token. The real secret never enters the container.
-		credHelper := `git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=cordon-placeholder-github-token"; }; f'`
+	// Credential helper returns a placeholder — the MITM proxy swaps it
+	// with the real token. The real secret never enters the container.
+	if placeholder, err := o.githubPlaceholder(ctx); err == nil {
+		credHelper := fmt.Sprintf(`git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=%s"; }; f'`, placeholder)
 		if _, err := o.backend.Exec(ctx, containerID, credHelper); err != nil {
 			log.Printf("[workspace] warning: git credential helper setup failed: %v", err)
 		}
@@ -172,6 +172,22 @@ func proxyEnv(internalProxyAddr string) []string {
 		"no_proxy=localhost,127.0.0.1",
 		"NO_PROXY=localhost,127.0.0.1",
 	}
+}
+
+// githubPlaceholder returns the placeholder string for the GITHUB_TOKEN secret.
+func (o *Orchestrator) githubPlaceholder(ctx context.Context) (string, error) {
+	if o.vault == nil {
+		return "", fmt.Errorf("no vault configured")
+	}
+	return o.vault.PlaceholderFor(ctx, o.tenantID, "GITHUB_TOKEN")
+}
+
+// githubToken returns the real GitHub token value from the vault.
+func (o *Orchestrator) githubToken(ctx context.Context) (string, error) {
+	if o.vault == nil {
+		return "", fmt.Errorf("no vault configured")
+	}
+	return o.vault.RevealValue(ctx, o.tenantID, "GITHUB_TOKEN")
 }
 
 // redactToken removes a GitHub token from output to prevent leaking in logs.

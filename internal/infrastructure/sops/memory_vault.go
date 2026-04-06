@@ -124,3 +124,14 @@ func (v *MemoryVault) ListRefs(_ context.Context, tenantID uuid.UUID) ([]domain.
 	defer v.mu.RUnlock()
 	return v.refs[tenantID.String()], nil
 }
+
+func (v *MemoryVault) PlaceholderFor(_ context.Context, tenantID uuid.UUID, name string) (string, error) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	tid := tenantID.String()
+	placeholder, ok := v.byName[tid][name]
+	if !ok {
+		return "", fmt.Errorf("secret %q not found", name)
+	}
+	return placeholder, nil
+}

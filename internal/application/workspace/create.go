@@ -104,7 +104,8 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 	if dcPath == "" {
 		dcPath = config.DevcontainerPath
 	}
-	result, err := o.builder.Build(ctx, primary.URL, primary.BaseBranch, o.token, dcPath)
+	buildToken, _ := o.githubToken(ctx)
+	result, err := o.builder.Build(ctx, primary.URL, primary.BaseBranch, buildToken, dcPath)
 	if err != nil {
 		return domain.Workspace{}, fmt.Errorf("building devcontainer image: %w", err)
 	}
@@ -375,6 +376,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 
 // cloneRepos clones each repo into the primary container.
 func (o *Orchestrator) cloneRepos(ctx context.Context, cid string, repos []domain.RepoConfig, emit func(string, string)) {
+	tokenForRedaction, _ := o.githubToken(ctx)
 	for _, repo := range repos {
 		shortName := domain.RepoShortName(repo.URL)
 		cloneDir := "/workspace/" + shortName
@@ -390,7 +392,7 @@ func (o *Orchestrator) cloneRepos(ctx context.Context, cid string, repos []domai
 				emit("cloning_repo", fmt.Sprintf("Branch %s not found, cloning %s...", repo.Branch, repo.BaseBranch))
 				fallbackCmd := fmt.Sprintf("git clone --branch %s %s %s 2>&1", repo.BaseBranch, cloneURL, cloneDir)
 				if output, err := o.backend.ExecWithOutput(ctx, cid, fallbackCmd); err != nil {
-					log.Printf("[workspace] warning: clone of %s failed: %v\n%s", repo.URL, err, redactToken(output, o.token))
+					log.Printf("[workspace] warning: clone of %s failed: %v\n%s", repo.URL, err, redactToken(output, tokenForRedaction))
 				} else {
 					checkoutCmd := fmt.Sprintf("cd %s && git checkout -b %s", cloneDir, repo.Branch)
 					if _, err := o.backend.Exec(ctx, cid, checkoutCmd); err != nil {
@@ -398,7 +400,7 @@ func (o *Orchestrator) cloneRepos(ctx context.Context, cid string, repos []domai
 					}
 				}
 			} else {
-				log.Printf("[workspace] warning: clone of %s failed: %v\n%s", repo.URL, err, redactToken(output, o.token))
+				log.Printf("[workspace] warning: clone of %s failed: %v\n%s", repo.URL, err, redactToken(output, tokenForRedaction))
 			}
 		}
 	}
@@ -415,7 +417,8 @@ func (o *Orchestrator) startServiceContainers(ctx context.Context, primaryName, 
 		emit("building_service", fmt.Sprintf("Building service container for %s...", shortName))
 
 		dcPath := repo.DevcontainerPath
-		svcResult, err := o.builder.Build(ctx, repo.URL, repo.BaseBranch, o.token, dcPath)
+		svcToken, _ := o.githubToken(ctx)
+		svcResult, err := o.builder.Build(ctx, repo.URL, repo.BaseBranch, svcToken, dcPath)
 		if err != nil {
 			log.Printf("[workspace] warning: service container build for %s failed: %v", shortName, err)
 			continue

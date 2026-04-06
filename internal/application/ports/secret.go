@@ -14,4 +14,5 @@ type SecretVault interface {
 	SetSecret(ctx context.Context, tenantID uuid.UUID, name, placeholder, realValue string) error
 	DeleteSecret(ctx context.Context, tenantID uuid.UUID, name string) error
 	RevealValue(ctx context.Context, tenantID uuid.UUID, name string) (string, error)
+	PlaceholderFor(ctx context.Context, tenantID uuid.UUID, name string) (string, error)
 }

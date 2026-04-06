@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/NicoSchwandner/cordon/internal/api/middleware"
+	"github.com/NicoSchwandner/cordon/internal/api/ws"
 	"github.com/NicoSchwandner/cordon/internal/application/ports"
 	"github.com/NicoSchwandner/cordon/internal/application/progress"
 	"github.com/NicoSchwandner/cordon/internal/domain"
@@ -38,10 +39,11 @@ type WorkspaceHandler struct {
 	activity WorkspaceActivityRecorder // optional, nil-safe
 	ttl      WorkspaceTTLExtender      // optional, nil-safe
 	preparer WorkspacePreparer         // optional, nil-safe
+	agents   *ws.AgentRegistry         // optional, nil-safe
 }
 
-func NewWorkspaceHandler(service ports.WorkspaceService, ps *progress.Store, ar WorkspaceActivityRecorder, ttl WorkspaceTTLExtender) *WorkspaceHandler {
-	h := &WorkspaceHandler{service: service, progress: ps, activity: ar, ttl: ttl}
+func NewWorkspaceHandler(service ports.WorkspaceService, ps *progress.Store, ar WorkspaceActivityRecorder, ttl WorkspaceTTLExtender, agents *ws.AgentRegistry) *WorkspaceHandler {
+	h := &WorkspaceHandler{service: service, progress: ps, activity: ar, ttl: ttl, agents: agents}
 	// If the service implements WorkspacePreparer (e.g., PersistentService), use it.
 	if p, ok := service.(WorkspacePreparer); ok {
 		h.preparer = p
@@ -466,6 +468,17 @@ func (h *WorkspaceHandler) ExecInWorkspace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	if h.activity != nil {
+		h.activity.RecordActivity(wsID)
+	}
+
+	// Streaming path: if stream requested and an agent is connected, relay via WebSocket.
+	if req.Stream && h.agents != nil && req.Repo != "" && h.agents.IsConnected(wsID, req.Repo) {
+		h.execStreaming(w, r, wsID, req)
+		return
+	}
+
+	// Fallback: synchronous docker exec
 	exitCode, output, err := h.service.ExecInRepo(r.Context(), wsID, req.Repo, req.Cmd)
 	if err != nil {
 		middleware.WriteProblem(w, domain.ProblemDetails{
@@ -475,15 +488,39 @@ func (h *WorkspaceHandler) ExecInWorkspace(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if h.activity != nil {
-		h.activity.RecordActivity(wsID)
-	}
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(ExecResponse{
 		ExitCode: exitCode,
 		Output:   output,
 	})
+}
+
+// execStreaming relays an exec request to a connected agent and streams JSONL output.
+func (h *WorkspaceHandler) execStreaming(w http.ResponseWriter, r *http.Request, wsID uuid.UUID, req ExecRequest) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	ch, err := h.agents.Exec(r.Context(), wsID, req.Repo, req.Cmd, "")
+	if err != nil {
+		middleware.WriteProblem(w, domain.ProblemDetails{
+			Type: "https://cordon.dev/problems/exec-failed", Title: "Exec Failed",
+			Status: 500, Detail: err.Error(), Code: "exec_failed",
+		})
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	flusher.Flush()
+
+	enc := json.NewEncoder(w)
+	for msg := range ch {
+		enc.Encode(msg)
+		flusher.Flush()
+	}
 }
 
 type ActivateRepoRequest struct {
