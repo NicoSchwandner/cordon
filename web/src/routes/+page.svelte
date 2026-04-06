@@ -8,7 +8,7 @@
 	import MessageBanner from '$lib/shared/components/MessageBanner.svelte';
 	import { getContext, onMount } from 'svelte';
 	import { goto } from '$app/navigation';
-	import { createWorkspace, listOrgRepos, listUserOrgs } from '$lib/shared/api/client';
+	import { createWorkspace, listWorkspaces, listOrgRepos, listUserOrgs } from '$lib/shared/api/client';
 	import type { WorkspaceResponse, OrgRepo, UserOrg } from '$lib/shared/api/types';
 
 	const getHealthy = getContext<() => boolean | null>('healthy');
@@ -20,9 +20,21 @@
 	let newName = $state('');
 	let creating = $state(false);
 	let wsMode: 'dev' | 'investigation' = $state('dev');
-	let extraWorkspaces: WorkspaceResponse[] = $state([]);
 	let createError = $state('');
-	const workspaces = $derived([...extraWorkspaces, ...data.workspaces]);
+	let polledWorkspaces: WorkspaceResponse[] | null = $state(null);
+	const workspaces = $derived(polledWorkspaces ?? data.workspaces);
+
+	// Poll workspace list when any workspace is creating, so the dashboard stays current.
+	const hasCreating = $derived(workspaces.some(ws => ws.status === 'creating'));
+	$effect(() => {
+		if (!hasCreating) return;
+		const interval = setInterval(async () => {
+			try {
+				polledWorkspaces = await listWorkspaces();
+			} catch { /* ignore */ }
+		}, 3_000);
+		return () => clearInterval(interval);
+	});
 
 	// Org catalog state
 	let org = $state('');

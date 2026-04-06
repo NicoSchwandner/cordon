@@ -2,7 +2,7 @@
 	import { connectCreationSSE } from '$lib/shared/api/client';
 	import type { ProgressEvent } from '$lib/shared/api/types';
 
-	let { workspaceId, onready }: { workspaceId: string; onready?: () => void } = $props();
+	let { workspaceId, createdAt, onready }: { workspaceId: string; createdAt?: string; onready?: () => void } = $props();
 
 	let events: ProgressEvent[] = $state([]);
 	let currentMessage = $state('Starting...');
@@ -21,7 +21,7 @@
 	});
 
 	$effect(() => {
-		startTime = Date.now();
+		startTime = createdAt ? new Date(createdAt).getTime() : Date.now();
 
 		timer = setInterval(() => {
 			elapsed = (Date.now() - startTime) / 1000;

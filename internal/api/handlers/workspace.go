@@ -392,7 +392,7 @@ func (h *WorkspaceHandler) CreationLogs(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	history, ch, ok := h.progress.Subscribe(wsID)
+	history, ch, unsub, ok := h.progress.Subscribe(wsID)
 	if !ok {
 		// No in-flight creation — send a single done event
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -403,6 +403,7 @@ func (h *WorkspaceHandler) CreationLogs(w http.ResponseWriter, r *http.Request) 
 		fmt.Fprintf(w, "data: %s\n\n", data)
 		return
 	}
+	defer unsub()
 
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")

@@ -18,15 +18,17 @@ type Event struct {
 // Func is a callback for emitting progress updates.
 type Func func(step, message string)
 
-// workspace holds the live channel and event history for a single creation.
+// workspace holds subscribers and event history for a single creation.
 type workspace struct {
-	mu      sync.Mutex
-	ch      chan Event
-	history []Event
+	mu          sync.Mutex
+	subscribers map[int]chan Event
+	nextID      int
+	history     []Event
+	closed      bool
 }
 
 func newWorkspace() *workspace {
-	return &workspace{ch: make(chan Event, 20)}
+	return &workspace{subscribers: make(map[int]chan Event)}
 }
 
 func (w *workspace) append(evt Event) {
@@ -43,6 +45,46 @@ func (w *workspace) snapshot() []Event {
 	return out
 }
 
+// subscribe creates a new per-subscriber channel. Returns channel and an ID for unsubscribing.
+func (w *workspace) subscribe() (<-chan Event, int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	id := w.nextID
+	w.nextID++
+	ch := make(chan Event, 20)
+	w.subscribers[id] = ch
+	return ch, id
+}
+
+func (w *workspace) unsubscribe(id int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	delete(w.subscribers, id)
+}
+
+// broadcast sends an event to all subscribers. Non-blocking per subscriber.
+func (w *workspace) broadcast(evt Event) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	for _, ch := range w.subscribers {
+		select {
+		case ch <- evt:
+		default:
+		}
+	}
+}
+
+// closeAll closes all subscriber channels.
+func (w *workspace) closeAll() {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.closed = true
+	for id, ch := range w.subscribers {
+		close(ch)
+		delete(w.subscribers, id)
+	}
+}
+
 // Store tracks in-flight workspace creation progress via channels.
 type Store struct {
 	workspaces sync.Map // uuid.UUID -> *workspace
@@ -54,25 +96,28 @@ func NewStore(timing *TimingStore) *Store {
 	return &Store{timing: timing}
 }
 
-// Create registers a progress channel for a workspace. Returns the channel for the SSE handler.
-func (s *Store) Create(id uuid.UUID) <-chan Event {
+// Create registers a workspace for progress tracking.
+func (s *Store) Create(id uuid.UUID) {
 	ws := newWorkspace()
 	s.workspaces.Store(id, ws)
-	return ws.ch
 }
 
-// Subscribe returns the event history and live channel for a workspace.
-// History contains all events emitted so far; the channel delivers future events.
-func (s *Store) Subscribe(id uuid.UUID) ([]Event, <-chan Event, bool) {
+// Subscribe returns the event history and a dedicated channel for this subscriber.
+// Each caller gets its own channel so multiple SSE clients all receive every event.
+// The returned unsubscribe function must be called when the subscriber disconnects.
+func (s *Store) Subscribe(id uuid.UUID) ([]Event, <-chan Event, func(), bool) {
 	v, ok := s.workspaces.Load(id)
 	if !ok {
-		return nil, nil, false
+		return nil, nil, nil, false
 	}
 	ws := v.(*workspace)
-	return ws.snapshot(), ws.ch, true
+	history := ws.snapshot()
+	ch, subID := ws.subscribe()
+	unsub := func() { ws.unsubscribe(subID) }
+	return history, ch, unsub, true
 }
 
-// Send emits a progress event. Non-blocking; drops if buffer is full.
+// Send emits a progress event to all subscribers. Non-blocking per subscriber.
 func (s *Store) Send(id uuid.UUID, step, message string) {
 	v, ok := s.workspaces.Load(id)
 	if !ok {
@@ -81,10 +126,7 @@ func (s *Store) Send(id uuid.UUID, step, message string) {
 	ws := v.(*workspace)
 	evt := Event{Step: step, Message: message}
 	ws.append(evt)
-	select {
-	case ws.ch <- evt:
-	default:
-	}
+	ws.broadcast(evt)
 }
 
 // SendWithEstimate emits a progress event that includes the estimated total build time.
@@ -99,13 +141,10 @@ func (s *Store) SendWithEstimate(id uuid.UUID, repo, step, message string) {
 		evt.EstimatedSecs = int(s.timing.Estimate(repo).Seconds())
 	}
 	ws.append(evt)
-	select {
-	case ws.ch <- evt:
-	default:
-	}
+	ws.broadcast(evt)
 }
 
-// Complete sends a final event and closes the channel.
+// Complete sends a final event and closes all subscriber channels.
 func (s *Store) Complete(id uuid.UUID, err error) {
 	v, ok := s.workspaces.LoadAndDelete(id)
 	if !ok {
@@ -118,21 +157,15 @@ func (s *Store) Complete(id uuid.UUID, err error) {
 		evt.Error = err.Error()
 	}
 	ws.append(evt)
-	select {
-	case ws.ch <- evt:
-	default:
-	}
-	close(ws.ch)
+	ws.broadcast(evt)
+	ws.closeAll()
 }
 
-// CreateIfAbsent registers a progress channel only if one doesn't already exist.
-// Used for activation progress on existing workspaces.
-func (s *Store) CreateIfAbsent(id uuid.UUID) <-chan Event {
-	if _, _, ok := s.Subscribe(id); ok {
-		v, _ := s.workspaces.Load(id)
-		return v.(*workspace).ch
+// CreateIfAbsent registers a workspace for progress tracking only if not already tracked.
+func (s *Store) CreateIfAbsent(id uuid.UUID) {
+	if _, loaded := s.workspaces.LoadOrStore(id, newWorkspace()); loaded {
+		return
 	}
-	return s.Create(id)
 }
 
 // Timing returns the underlying timing store, or nil.

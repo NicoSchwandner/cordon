@@ -226,7 +226,7 @@
 	<!-- Main content: Progress or Terminal + Agent Panel -->
 	{#if isCreating}
 		<div class="flex-1 overflow-hidden rounded-xl border border-border bg-surface">
-			<CreationProgress workspaceId={data.workspaceId} onready={handleCreationReady} />
+			<CreationProgress workspaceId={data.workspaceId} createdAt={workspace?.created_at} onready={handleCreationReady} />
 		</div>
 	{:else if isInvestigation && investigation}
 		<!-- Investigation layout: repo list + terminal -->
