@@ -8,6 +8,7 @@
 	import type { WorkspaceResponse } from '$lib/shared/api/types';
 	import { connectTerminalWS } from '$lib/shared/api/websocket';
 	import { createTerminal } from '$lib/platform/terminal';
+	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 
 	let { data } = $props();
@@ -16,6 +17,11 @@
 	// (container doesn't exist during creation, so GET returns 404)
 	const navState = page.state as Record<string, unknown> | undefined;
 	const initialWorkspace = data.workspace ?? (navState?.workspace as WorkspaceResponse | undefined) ?? null;
+
+	// Redirect to dashboard if workspace genuinely doesn't exist (not mid-creation)
+	if (data.notFound && !navState?.workspace) {
+		goto('/', { replaceState: true });
+	}
 
 	let workspace = $state<WorkspaceResponse | null>(initialWorkspace);
 	let terminalEl: HTMLDivElement | undefined = $state();
