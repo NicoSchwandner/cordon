@@ -27,15 +27,26 @@ type WorkspaceTTLExtender interface {
 	EffectiveExpiry(wsID uuid.UUID, labelExpiry time.Time) time.Time
 }
 
+// WorkspacePreparer persists a workspace record before async creation starts.
+type WorkspacePreparer interface {
+	InsertPending(ctx context.Context, ws domain.Workspace) error
+}
+
 type WorkspaceHandler struct {
 	service  ports.WorkspaceService
 	progress *progress.Store
 	activity WorkspaceActivityRecorder // optional, nil-safe
 	ttl      WorkspaceTTLExtender      // optional, nil-safe
+	preparer WorkspacePreparer         // optional, nil-safe
 }
 
 func NewWorkspaceHandler(service ports.WorkspaceService, ps *progress.Store, ar WorkspaceActivityRecorder, ttl WorkspaceTTLExtender) *WorkspaceHandler {
-	return &WorkspaceHandler{service: service, progress: ps, activity: ar, ttl: ttl}
+	h := &WorkspaceHandler{service: service, progress: ps, activity: ar, ttl: ttl}
+	// If the service implements WorkspacePreparer (e.g., PersistentService), use it.
+	if p, ok := service.(WorkspacePreparer); ok {
+		h.preparer = p
+	}
+	return h
 }
 
 type RepoConfigRequest struct {
@@ -193,6 +204,23 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		config.ID = wsID
 		now := time.Now().UTC()
 
+		// Persist the workspace record before spawning the goroutine so it
+		// appears in dashboard listings immediately.
+		if h.preparer != nil {
+			pending := domain.Workspace{
+				ID:        wsID,
+				TenantID:  tenantID,
+				Name:      name,
+				Status:    domain.WorkspaceCreating,
+				CreatedAt: now,
+				ExpiresAt: now.Add(config.MaxLifetime),
+				Config:    config,
+			}
+			if err := h.preparer.InsertPending(r.Context(), pending); err != nil {
+				log.Printf("[workspace] failed to persist pending workspace: %v", err)
+			}
+		}
+
 		h.progress.Create(wsID)
 
 		go func() {
@@ -214,6 +242,21 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Bare workspaces: create synchronously (fast)
+	wsID := uuid.New()
+	config.ID = wsID
+	now := time.Now().UTC()
+
+	if h.preparer != nil {
+		pending := domain.Workspace{
+			ID: wsID, TenantID: tenantID, Name: name,
+			Status: domain.WorkspaceCreating, CreatedAt: now,
+			ExpiresAt: now.Add(config.MaxLifetime), Config: config,
+		}
+		if err := h.preparer.InsertPending(r.Context(), pending); err != nil {
+			log.Printf("[workspace] failed to persist pending workspace: %v", err)
+		}
+	}
+
 	ws, err := h.service.Create(r.Context(), tenantID, config)
 	if err != nil {
 		log.Printf("[workspace] create failed: %v", err)

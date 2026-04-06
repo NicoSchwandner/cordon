@@ -164,12 +164,21 @@ func main() {
 		authValidator = &middleware.StaticAuth{TenantID: tenantID, UserID: "developer"}
 	}
 
+	// Workspace persistence
+	workspaceStore := postgres.NewWorkspaceStore(pool)
+
 	// Workspace lifecycle management (idle timeout + TTL enforcement)
 	var lifecycleMgr *workspace.LifecycleManager
+	var wsService ports.WorkspaceService
 	var reaperCancel context.CancelFunc
 	if orchestrator != nil {
 		lifecycleMgr = workspace.NewLifecycleManager(15 * time.Minute)
-		reaper := workspace.NewReaper(dockerBackend, orchestrator, lifecycleMgr, 30*time.Second)
+
+		// Wrap orchestrator with persistent service so all operations update the DB.
+		persistent := workspace.NewPersistentService(workspaceStore, orchestrator)
+		wsService = persistent
+
+		reaper := workspace.NewReaper(dockerBackend, persistent, lifecycleMgr, 30*time.Second)
 		var reaperCtx context.Context
 		reaperCtx, reaperCancel = context.WithCancel(context.Background())
 		go reaper.Start(reaperCtx)
@@ -180,7 +189,7 @@ func main() {
 	proxyHandler := handlers.NewProxyHandler(pipeline)
 	auditHandler := handlers.NewAuditHandler(auditService)
 	approvalHandler := handlers.NewApprovalHandler(approvalStore)
-	workspaceHandler := handlers.NewWorkspaceHandler(orchestrator, progressStore, lifecycleMgr, lifecycleMgr)
+	workspaceHandler := handlers.NewWorkspaceHandler(wsService, progressStore, lifecycleMgr, lifecycleMgr)
 	secretHandler := handlers.NewSecretHandler(vault)
 
 	githubHandler := handlers.NewGitHubHandler(ghClient)

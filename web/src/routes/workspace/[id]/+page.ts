@@ -9,5 +9,10 @@ export const load: PageLoad = async ({ params }) => {
     const all = await listWorkspaces().catch(() => []);
     spawnedWorkspaces = all.filter((ws) => ws.spawned_from === params.id);
   }
-  return { workspace, workspaceId: params.id, spawnedWorkspaces };
+  return {
+    workspace,
+    workspaceId: params.id,
+    spawnedWorkspaces,
+    notFound: !workspace,
+  };
 };

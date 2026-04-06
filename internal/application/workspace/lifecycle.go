@@ -73,18 +73,24 @@ func (lm *LifecycleManager) Remove(wsID uuid.UUID) {
 	lm.mu.Unlock()
 }
 
+// WorkspaceLifecycleService is the subset of WorkspaceService the reaper needs.
+type WorkspaceLifecycleService interface {
+	Suspend(ctx context.Context, tenantID, workspaceID uuid.UUID) error
+	Destroy(ctx context.Context, tenantID, workspaceID uuid.UUID) error
+}
+
 // Reaper periodically checks workspaces and enforces idle timeout (suspend) and max lifetime (destroy).
 type Reaper struct {
 	backend  ports.ComputeBackend
-	orch     *Orchestrator
+	svc      WorkspaceLifecycleService
 	lm       *LifecycleManager
 	interval time.Duration
 }
 
-func NewReaper(backend ports.ComputeBackend, orch *Orchestrator, lm *LifecycleManager, interval time.Duration) *Reaper {
+func NewReaper(backend ports.ComputeBackend, svc WorkspaceLifecycleService, lm *LifecycleManager, interval time.Duration) *Reaper {
 	return &Reaper{
 		backend:  backend,
-		orch:     orch,
+		svc:      svc,
 		lm:       lm,
 		interval: interval,
 	}
@@ -134,7 +140,7 @@ func (r *Reaper) tick(ctx context.Context) {
 		// Check max lifetime → destroy
 		if now.After(effectiveExpiry) {
 			log.Printf("[reaper] workspace %s expired (expires=%s), destroying", ws.ID.String()[:8], effectiveExpiry.Format(time.RFC3339))
-			if err := r.orch.Destroy(ctx, ws.TenantID, ws.ID); err != nil {
+			if err := r.svc.Destroy(ctx, ws.TenantID, ws.ID); err != nil {
 				log.Printf("[reaper] destroy failed for %s: %v", ws.ID.String()[:8], err)
 			}
 			r.lm.Remove(ws.ID)
@@ -160,7 +166,7 @@ func (r *Reaper) tick(ctx context.Context) {
 
 		if now.Sub(lastActivity) > r.lm.idleTimeout {
 			log.Printf("[reaper] workspace %s idle since %s, suspending", ws.ID.String()[:8], lastActivity.Format(time.RFC3339))
-			if err := r.orch.Suspend(ctx, ws.TenantID, ws.ID); err != nil {
+			if err := r.svc.Suspend(ctx, ws.TenantID, ws.ID); err != nil {
 				log.Printf("[reaper] suspend failed for %s: %v", ws.ID.String()[:8], err)
 			}
 		}
