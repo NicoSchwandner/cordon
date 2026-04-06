@@ -108,6 +108,30 @@ func FindConfig(workspaceDir, customPath string) string {
 	return ""
 }
 
+// resolveEnvValue handles devcontainer variable substitution in env values.
+// Supports ${localEnv:VAR} and ${localEnv:VAR:default}.
+func resolveEnvValue(value string) string {
+	if !strings.Contains(value, "${localEnv:") {
+		return value
+	}
+	start := strings.Index(value, "${localEnv:")
+	end := strings.Index(value[start:], "}")
+	if end == -1 {
+		return value
+	}
+	end += start
+
+	inner := value[start+len("${localEnv:") : end]
+	varName, defaultVal, hasDefault := strings.Cut(inner, ":")
+
+	envVal := os.Getenv(varName)
+	if envVal == "" && hasDefault {
+		envVal = defaultVal
+	}
+
+	return value[:start] + envVal + resolveEnvValue(value[end+1:])
+}
+
 // stripJSONC removes single-line (//) and multi-line (/* */) comments from JSONC.
 // Respects string literals — comments inside strings are preserved.
 func stripJSONC(input string) string {

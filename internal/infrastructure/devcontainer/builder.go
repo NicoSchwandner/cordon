@@ -102,13 +102,13 @@ func (b *Builder) Build(ctx context.Context, repo, branch, token, devcontainerPa
 		log.Printf("[devcontainer] image %s built successfully", imageTag)
 	}
 
-	// Merge env maps
+	// Merge env maps, resolving devcontainer variable substitutions
 	env := make(map[string]string)
 	for k, v := range cfg.ContainerEnv {
-		env[k] = v
+		env[k] = resolveEnvValue(v)
 	}
 	for k, v := range cfg.RemoteEnv {
-		env[k] = v
+		env[k] = resolveEnvValue(v)
 	}
 
 	return &BuildResult{
