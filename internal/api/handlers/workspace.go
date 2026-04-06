@@ -392,7 +392,7 @@ func (h *WorkspaceHandler) CreationLogs(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	ch, ok := h.progress.Subscribe(wsID)
+	history, ch, ok := h.progress.Subscribe(wsID)
 	if !ok {
 		// No in-flight creation — send a single done event
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -413,6 +413,19 @@ func (h *WorkspaceHandler) CreationLogs(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Replay events that happened before this subscriber connected
+	for _, evt := range history {
+		data, _ := json.Marshal(evt)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+	}
+	flusher.Flush()
+
+	// If creation already completed, the last history event is "done"
+	if len(history) > 0 && history[len(history)-1].Done {
+		return
+	}
+
+	// Stream live events
 	ctx := r.Context()
 	for {
 		select {
