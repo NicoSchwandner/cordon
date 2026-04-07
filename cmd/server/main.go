@@ -64,6 +64,8 @@ func main() {
 	// Infrastructure
 	auditStore := postgres.NewAuditStore(pool)
 	approvalStore := ws.NewApprovalStore()
+	grantStore := postgres.NewApprovalGrantStore(pool)
+	approvalStore.SetGrantStore(grantStore)
 	vault := sops.NewMemoryVault()
 
 	tenantID := uuid.MustParse(cfg.Auth.DefaultTenantID)
