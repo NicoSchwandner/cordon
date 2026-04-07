@@ -206,6 +206,71 @@ make install-tools      Install air + npm deps
 make migrate            Run database migrations
 ```
 
+## Security Model — Defense in Depth
+
+The threat model assumes **anything running inside a workspace is potentially malicious**. An AI agent (or any code it executes) may attempt to exfiltrate secrets, access unauthorized services, destroy data, or escape the container. Cordon defends against this with seven layers, each independent — compromising one layer should not defeat the others.
+
+### Layer 1: Network Isolation
+
+Workspace containers run on Docker internal networks with **no route to the outside world**. The only path out is through a per-workspace gateway container that forwards traffic exclusively to the Cordon proxy. Containers lack `CAP_NET_ADMIN` and cannot modify routing.
+
+**Current gaps:** DNS queries are not filtered (resolved by Docker daemon, not Cordon). Egress can be disabled entirely via `CORDON_EGRESS_ENFORCE=false` for development.
+
+### Layer 2: Egress Allowlist
+
+Even traffic that reaches the proxy is checked against a host allowlist. Only explicitly permitted hosts (e.g., `github.com`, `registry.npmjs.org`) are reachable. Everything else returns 403.
+
+**Current gaps:** The allowlist is global (not per-workspace or per-tenant) and hardcoded — changing it requires a code change and redeploy. No per-workspace egress policies exist yet.
+
+### Layer 3: Operation Classification (Tier System)
+
+Every SQL query and HTTP request is classified into tiers (T1–T4) before execution. Classification determines whether the operation proceeds, requires approval, or is blocked outright.
+
+**Current gaps:** SQL classification is keyword-based, not parse-based. It can't detect unbounded result sets disguised with high LIMIT values, SQL injection in agent-constructed queries, or data exfiltration via benign-looking SELECTs. MCP tool calls bypass the pipeline entirely (see OPEN-ISSUES.md).
+
+### Layer 4: Approval Gates
+
+Tier 3 operations (DELETE, DROP TABLE, unbounded SELECT) block until a human approves or denies via the dashboard or CLI. Approvals can be scoped (one-time, session, or pattern-based) and have a 5-minute timeout.
+
+**Current gaps:** Approval grants are stored in memory and lost on server restart. The approval decision itself is not persisted to the audit trail (only the operation outcome is).
+
+### Layer 5: Secret Isolation
+
+Containers never see real credentials. The workspace receives placeholder tokens (`cordon-placeholder-database-url`). Real values are injected at the proxy layer during secret swap — after classification and approval, immediately before the request is forwarded upstream. Real values never appear in audit logs, API responses, or container environment variables.
+
+**Current gaps:** The vault is in-memory only (loaded from env vars at startup, lost on restart, no encryption at rest). The `sanitizeEnv()` function catches known secrets during container creation, but unregistered secrets in devcontainer.json would leak. Secret swap is text-based string replacement, not cryptographic — predictable placeholder formats could theoretically be exploited.
+
+### Layer 6: Audit Trail
+
+Every operation through the proxy pipeline is logged to an append-only PostgreSQL store: what was attempted, the tier classification, the decision (allowed/blocked/denied), duration, and redacted details. Real-time streaming to the dashboard via WebSocket.
+
+**Current gaps:** Audit writes are best-effort (`_ = audit.Write(...)`) — failures are silently dropped, not queued or retried. Workspace lifecycle events (create, destroy, suspend) are logged to stdout but not the audit store. Terminal sessions and container-internal commands are not audited. Response data (row counts, result sizes) is not captured.
+
+### Layer 7: Container Hardening
+
+Containers run unprivileged with CPU and memory limits. They are ephemeral by design — destroyed after use with no persistent state. The Docker socket is never mounted.
+
+**Current gaps:** No explicit capability dropping (default Docker caps include `CAP_NET_RAW`, `CAP_SYS_PTRACE`). No seccomp profile. No AppArmor/SELinux policies. No image vulnerability scanning. Full read-write filesystem access within the container.
+
+### Cross-Cutting: Tenant Isolation
+
+All state (workspaces, secrets, audit entries, approvals) is scoped by tenant ID. No cross-tenant data access is possible through the API.
+
+**Current gaps:** Authentication is not implemented — static tenant ID in dev mode means anyone who can reach port 8443 operates as the default tenant. Real OIDC/Entra ID integration is deferred.
+
+### Layer Maturity Summary
+
+| Layer               | Status      | Production-Ready                    |
+| ------------------- | ----------- | ----------------------------------- |
+| Network Isolation   | Implemented | Yes (Docker)                        |
+| Egress Allowlist    | Implemented | Partial — needs per-workspace rules |
+| Tier Classification | Implemented | Partial — keyword-only SQL          |
+| Approval Gates      | Implemented | Partial — in-memory grants          |
+| Secret Isolation    | Implemented | No — needs real vault backend       |
+| Audit Trail         | Implemented | Partial — best-effort writes        |
+| Container Hardening | Basic       | No — needs seccomp/AppArmor         |
+| Tenant Isolation    | Designed    | No — needs real auth                |
+
 ## Design Decisions
 
 | Decision       | Choice                  | Rationale                                                  |
