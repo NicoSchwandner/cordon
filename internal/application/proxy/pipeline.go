@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
@@ -235,7 +236,15 @@ func (p *Pipeline) auditEntry(req ProxyRequest, tier domain.Tier, decision domai
 
 func (p *Pipeline) writeAudit(ctx context.Context, entry domain.AuditEntry) {
 	if p.audit != nil {
-		_ = p.audit.Write(ctx, entry) // best-effort; don't block request on audit failure
+		if err := p.audit.Write(ctx, entry); err != nil {
+			slog.Error("audit write failed",
+				"component", "pipeline",
+				"operation", entry.Operation,
+				"target", entry.Target,
+				"decision", string(entry.Decision),
+				"error", err,
+			)
+		}
 	}
 	if p.broadcast != nil {
 		p.broadcast.Publish(entry)
