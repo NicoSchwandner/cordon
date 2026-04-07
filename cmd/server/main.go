@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"log"
 	"log/slog"
 	"net"
@@ -66,24 +67,51 @@ func main() {
 	approvalStore := ws.NewApprovalStore()
 	grantStore := postgres.NewApprovalGrantStore(pool)
 	approvalStore.SetGrantStore(grantStore)
-	vault := sops.NewMemoryVault()
 
 	tenantID := uuid.MustParse(cfg.Auth.DefaultTenantID)
-	vault.AddSecret(tenantID, "DATABASE_URL", "cordon-placeholder-database-url", cfg.Secrets.RealDatabaseURL)
-	vault.AddSecret(tenantID, "API_KEY", "cordon-placeholder-api-key", cfg.Secrets.RealAPIKey)
+
+	// Secret vault: PostgreSQL with AES-256-GCM when CORDON_MASTER_KEY is set,
+	// otherwise in-memory for development. The SecretVault interface allows
+	// swapping to Azure Key Vault or HashiCorp Vault later.
+	var vault ports.SecretVault
+	if cfg.Secrets.MasterKey != "" {
+		masterKey, err := hex.DecodeString(cfg.Secrets.MasterKey)
+		if err != nil {
+			log.Fatalf("CORDON_MASTER_KEY must be hex-encoded: %v", err)
+		}
+		pgVault, err := postgres.NewSecretVault(pool, masterKey)
+		if err != nil {
+			log.Fatalf("creating encrypted vault: %v", err)
+		}
+		vault = pgVault
+		slog.Info("secret vault: PostgreSQL with AES-256-GCM encryption")
+
+		// Seed initial secrets from env vars if they don't already exist in the DB.
+		seedSecret(ctx, vault, tenantID, "DATABASE_URL", "cordon-placeholder-database-url", cfg.Secrets.RealDatabaseURL)
+		seedSecret(ctx, vault, tenantID, "API_KEY", "cordon-placeholder-api-key", cfg.Secrets.RealAPIKey)
+		if cfg.Secrets.GitHubToken != "" {
+			seedSecret(ctx, vault, tenantID, "GITHUB_TOKEN", "PLACEHOLDER_GITHUB_TOKEN", cfg.Secrets.GitHubToken)
+		}
+	} else {
+		memVault := sops.NewMemoryVault()
+		memVault.AddSecret(tenantID, "DATABASE_URL", "cordon-placeholder-database-url", cfg.Secrets.RealDatabaseURL)
+		memVault.AddSecret(tenantID, "API_KEY", "cordon-placeholder-api-key", cfg.Secrets.RealAPIKey)
+		if cfg.Secrets.GitHubToken != "" {
+			memVault.AddSecret(tenantID, "GITHUB_TOKEN", "PLACEHOLDER_GITHUB_TOKEN", cfg.Secrets.GitHubToken)
+		}
+		vault = memVault
+		slog.Info("secret vault: in-memory (set CORDON_MASTER_KEY for persistent encrypted storage)")
+	}
+
+	if cfg.Secrets.GitHubToken != "" {
+		slog.Info("GITHUB_TOKEN configured — private repo cloning enabled")
+	}
 
 	// Devcontainer builder (optional — needs `devcontainer` CLI on PATH)
 	var dcBuilder *devcontainer.Builder
 	dcBuilder, err = devcontainer.NewBuilder()
 	if err != nil {
 		slog.Warn("devcontainer CLI not available, repo-based workspaces disabled", "error", err)
-	}
-
-	// GitHub token — read from config, register as secret.
-	// Users can also register/update via POST /api/secrets at runtime.
-	if cfg.Secrets.GitHubToken != "" {
-		slog.Info("GITHUB_TOKEN configured — private repo cloning enabled")
-		vault.AddSecret(tenantID, "GITHUB_TOKEN", "PLACEHOLDER_GITHUB_TOKEN", cfg.Secrets.GitHubToken)
 	}
 
 	// GitHub API client (shared across provider + handlers)
@@ -314,5 +342,15 @@ func main() {
 	slog.Info("Cordon server starting", "port", cfg.Server.Port, "auth", cfg.Auth.Mode, "workspaces", orchestrator != nil)
 	if err := server.Serve(ppListener); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
+	}
+}
+
+// seedSecret writes a secret to the vault if it doesn't already exist.
+// Used at startup to migrate env-var secrets into the persistent vault.
+func seedSecret(ctx context.Context, vault ports.SecretVault, tenantID uuid.UUID, name, placeholder, realValue string) {
+	if _, err := vault.PlaceholderFor(ctx, tenantID, name); err != nil {
+		if err := vault.SetSecret(ctx, tenantID, name, placeholder, realValue); err != nil {
+			slog.Warn("failed to seed secret", "name", name, "error", err)
+		}
 	}
 }

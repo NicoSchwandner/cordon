@@ -44,6 +44,7 @@ type SecretSettings struct {
 	RealDatabaseURL string
 	RealAPIKey      string
 	GitHubToken     string
+	MasterKey       string // 32-byte hex-encoded key for AES-256-GCM encryption at rest
 }
 
 type EgressSettings struct {
@@ -103,6 +104,7 @@ func LoadServer() (*ServerConfig, error) {
 			RealDatabaseURL: envOr("REAL_DATABASE_URL", "postgresql://real:secret@db:5432/prod"),
 			RealAPIKey:      envOr("REAL_API_KEY", "sk-real-key-12345"),
 			GitHubToken:     os.Getenv("GITHUB_TOKEN"),
+			MasterKey:       os.Getenv("CORDON_MASTER_KEY"),
 		},
 		Egress: EgressSettings{
 			Enforce:   os.Getenv("CORDON_EGRESS_ENFORCE") != "false",
