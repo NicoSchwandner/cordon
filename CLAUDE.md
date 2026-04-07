@@ -58,7 +58,7 @@ Enforced by `archtest/`:
 - **Tier classification**: SQL keyword-based (T1-T4), HTTP method-based. Overrides via `.cordon.yaml`.
 - **Secret swap**: Placeholder strings in requests replaced with real credentials at proxy level. Real values never in audit logs or API responses.
 - **Error responses**: RFC 7807 ProblemDetails (`application/problem+json`), type URLs at `cordon.dev/problems/`.
-- **Auth**: Pluggable via `AuthValidator` interface. Static mode (single tenant) for dev, token mode for multi-tenant.
+- **Auth**: Pluggable via `AuthValidator` interface. Static mode (dev, requires `CORDON_INSECURE=true`), token mode (API keys), JWT mode (production — verifies signed tokens from any OIDC provider via JWKS).
 - **Frontend**: SvelteKit 5 with Svelte 5 runes, Tailwind v4, `@theme` semantic tokens, adapter-static (SPA).
 
 ## Security Model
@@ -124,24 +124,28 @@ These are pragmatic shortcuts taken for the MVP that should be addressed for pro
 
 All server configuration is centralized in `internal/infrastructure/config/server_config.go` and loaded via `config.LoadServer()`.
 
-| Variable                    | Default                               | Description                                                |
-| --------------------------- | ------------------------------------- | ---------------------------------------------------------- |
-| `PORT`                      | `8443`                                | Server listen port                                         |
-| `DATABASE_URL`              | `postgres://...localhost:5432/cordon` | PostgreSQL connection                                      |
-| `AUTH_MODE`                 | `static`                              | `static` or `token`                                        |
-| `DEFAULT_TENANT_ID`         | `00000000-...0001`                    | Tenant ID for static auth                                  |
-| `CORDON_SERVER`             | `http://localhost:8443`               | CLI/E2E server URL                                         |
-| `CORDON_PROXY_ADDR`         | `host.docker.internal:{PORT}`         | Address workspaces use to reach the proxy                  |
-| `CORDON_EGRESS_ENFORCE`     | _(enabled by default)_                | Set to `false` to disable network-level egress enforcement |
-| `CORDON_EGRESS_ALLOWLIST`   | github,anthropic,npm,nuget            | Comma-separated egress host allowlist                      |
-| `CORDON_IDLE_TIMEOUT`       | `15m`                                 | Default workspace idle timeout                             |
-| `CORDON_MAX_LIFETIME`       | `8h`                                  | Default workspace max lifetime                             |
-| `CORDON_MAX_EXTENSION`      | `24h`                                 | Hard ceiling for TTL extensions                            |
-| `CORDON_ASYNC_TIMEOUT`      | `30m`                                 | Timeout for async workspace creation                       |
-| `CORDON_APPROVAL_TIMEOUT`   | `5m`                                  | Timeout for T3 approval gates                              |
-| `CORDON_CLONE_CONCURRENCY`  | `12`                                  | Parallel repo clone semaphore size                         |
-| `CORDON_PROXY_HTTP_TIMEOUT` | `30s`                                 | Timeout for outbound HTTP proxy requests                   |
-| `CORDON_MAX_RESPONSE_BODY`  | `1048576`                             | Max response body size (bytes)                             |
-| `CORDON_REAPER_INTERVAL`    | `30s`                                 | How often the reaper checks for expired workspaces         |
-| `CORDON_GITHUB_REPO_TTL`    | `5m`                                  | Cache TTL for GitHub repo lists                            |
-| `CORDON_GITHUB_BRANCH_TTL`  | `2m`                                  | Cache TTL for GitHub branch lists                          |
+| Variable                    | Default                               | Description                                                 |
+| --------------------------- | ------------------------------------- | ----------------------------------------------------------- |
+| `PORT`                      | `8443`                                | Server listen port                                          |
+| `DATABASE_URL`              | `postgres://...localhost:5432/cordon` | PostgreSQL connection                                       |
+| `AUTH_MODE`                 | `static`                              | `static`, `token`, or `jwt`                                 |
+| `CORDON_INSECURE`           | _(unset)_                             | Must be `true` for `AUTH_MODE=static` (safety guard)        |
+| `DEFAULT_TENANT_ID`         | `00000000-...0001`                    | Tenant ID for static/token auth                             |
+| `CORDON_JWT_JWKS_URL`       | _(unset)_                             | JWKS endpoint for JWT key discovery (required for jwt mode) |
+| `CORDON_JWT_AUDIENCE`       | _(unset)_                             | Expected `aud` claim in JWTs (required for jwt mode)        |
+| `CORDON_JWT_TENANT_CLAIM`   | `tenant_id`                           | JWT claim name containing the tenant UUID                   |
+| `CORDON_SERVER`             | `http://localhost:8443`               | CLI/E2E server URL                                          |
+| `CORDON_PROXY_ADDR`         | `host.docker.internal:{PORT}`         | Address workspaces use to reach the proxy                   |
+| `CORDON_EGRESS_ENFORCE`     | _(enabled by default)_                | Set to `false` to disable network-level egress enforcement  |
+| `CORDON_EGRESS_ALLOWLIST`   | github,anthropic,npm,nuget            | Comma-separated egress host allowlist                       |
+| `CORDON_IDLE_TIMEOUT`       | `15m`                                 | Default workspace idle timeout                              |
+| `CORDON_MAX_LIFETIME`       | `8h`                                  | Default workspace max lifetime                              |
+| `CORDON_MAX_EXTENSION`      | `24h`                                 | Hard ceiling for TTL extensions                             |
+| `CORDON_ASYNC_TIMEOUT`      | `30m`                                 | Timeout for async workspace creation                        |
+| `CORDON_APPROVAL_TIMEOUT`   | `5m`                                  | Timeout for T3 approval gates                               |
+| `CORDON_CLONE_CONCURRENCY`  | `12`                                  | Parallel repo clone semaphore size                          |
+| `CORDON_PROXY_HTTP_TIMEOUT` | `30s`                                 | Timeout for outbound HTTP proxy requests                    |
+| `CORDON_MAX_RESPONSE_BODY`  | `1048576`                             | Max response body size (bytes)                              |
+| `CORDON_REAPER_INTERVAL`    | `30s`                                 | How often the reaper checks for expired workspaces          |
+| `CORDON_GITHUB_REPO_TTL`    | `5m`                                  | Cache TTL for GitHub repo lists                             |
+| `CORDON_GITHUB_BRANCH_TTL`  | `2m`                                  | Cache TTL for GitHub branch lists                           |

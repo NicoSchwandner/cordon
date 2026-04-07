@@ -193,14 +193,27 @@ func main() {
 	// Auth
 	var authValidator middleware.AuthValidator
 	switch cfg.Auth.Mode {
+	case "jwt":
+		jwtAuth, err := middleware.NewJWTAuth(ctx, middleware.JWTAuthConfig{
+			JWKSURL:     cfg.Auth.JWKSURL,
+			Audience:    cfg.Auth.JWTAudience,
+			TenantClaim: cfg.Auth.TenantClaim,
+		})
+		if err != nil {
+			log.Fatalf("jwt auth setup: %v", err)
+		}
+		authValidator = jwtAuth
+		slog.Info("auth mode: JWT", "jwks_url", cfg.Auth.JWKSURL, "audience", cfg.Auth.JWTAudience)
 	case "token":
 		authValidator = &middleware.TokenAuth{
 			Tokens: map[string]middleware.TokenInfo{
 				cfg.Auth.APIToken: {TenantID: tenantID, UserID: "developer"},
 			},
 		}
+		slog.Warn("auth mode: shared API token — consider AUTH_MODE=jwt for production")
 	default:
 		authValidator = &middleware.StaticAuth{TenantID: tenantID, UserID: "developer"}
+		slog.Warn("auth mode: static (NO AUTHENTICATION) — development use only")
 	}
 
 	// Workspace persistence

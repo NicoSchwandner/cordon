@@ -256,7 +256,15 @@ Containers run unprivileged with CPU and memory limits. They are ephemeral by de
 
 All state (workspaces, secrets, audit entries, approvals) is scoped by tenant ID. No cross-tenant data access is possible through the API.
 
-**Current gaps:** Authentication is not implemented — static tenant ID in dev mode means anyone who can reach port 8443 operates as the default tenant. Real OIDC/Entra ID integration is deferred.
+**Authentication modes:**
+
+| Mode     | Use Case          | How                                                           |
+| -------- | ----------------- | ------------------------------------------------------------- |
+| `static` | Local development | No auth. Requires `CORDON_INSECURE=true` as a safety guard.   |
+| `token`  | Small teams / CI  | Shared API key via `Authorization: Bearer <token>` header.    |
+| `jwt`    | Production        | Verifies signed JWT tokens from any OIDC-compatible provider. |
+
+**Bring your own IdP:** Cordon does not implement authentication protocols — it only verifies JWT signatures. Point `CORDON_JWT_JWKS_URL` at your identity provider's JWKS endpoint (Entra ID, Auth0, Cognito, Keycloak, etc.) and Cordon will cryptographically verify every request. The deployer owns the auth stack; Cordon just checks the proof.
 
 ### Layer Maturity Summary
 
@@ -265,21 +273,21 @@ All state (workspaces, secrets, audit entries, approvals) is scoped by tenant ID
 | Network Isolation   | Implemented | Yes (Docker)                        |
 | Egress Allowlist    | Implemented | Partial — needs per-workspace rules |
 | Tier Classification | Implemented | Partial — keyword-only SQL          |
-| Approval Gates      | Implemented | Partial — in-memory grants          |
-| Secret Isolation    | Implemented | No — needs real vault backend       |
+| Approval Gates      | Implemented | Yes — PostgreSQL-backed grants      |
+| Secret Isolation    | Implemented | Yes — AES-256-GCM encrypted vault   |
 | Audit Trail         | Implemented | Partial — best-effort writes        |
-| Container Hardening | Basic       | No — needs seccomp/AppArmor         |
-| Tenant Isolation    | Designed    | No — needs real auth                |
+| Container Hardening | Implemented | Partial — needs seccomp/AppArmor    |
+| Tenant Isolation    | Implemented | Yes — JWT auth with any OIDC IdP    |
 
 ## Design Decisions
 
-| Decision       | Choice                  | Rationale                                                  |
-| -------------- | ----------------------- | ---------------------------------------------------------- |
-| DB access (v1) | HTTP-only (`POST /sql`) | Postgres wire protocol can't be intercepted by HTTP proxy  |
-| SQL parser     | Keyword-based           | Simple, sufficient for v1, upgradeable to vitess/sqlparser |
-| Auth (v1)      | Static tenant ID        | Single-user dev; Ory Kratos integration planned            |
-| Approval store | In-memory + channels    | Decisions are ephemeral; persistence not needed for v1     |
-| Frontend       | SvelteKit SPA           | adapter-static, Vite proxy to Go backend                   |
+| Decision       | Choice                    | Rationale                                                      |
+| -------------- | ------------------------- | -------------------------------------------------------------- |
+| DB access (v1) | HTTP-only (`POST /sql`)   | Postgres wire protocol can't be intercepted by HTTP proxy      |
+| SQL parser     | Keyword-based             | Simple, sufficient for v1, upgradeable to vitess/sqlparser     |
+| Auth           | JWT verification (BYOIDP) | Cordon verifies tokens, never issues them — bring your own IdP |
+| Approval store | PostgreSQL + WebSocket    | Persistent grants survive restarts; real-time via WS           |
+| Frontend       | SvelteKit SPA             | adapter-static, Vite proxy to Go backend                       |
 
 ## License
 

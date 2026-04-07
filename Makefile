@@ -16,6 +16,7 @@ dev: dev-db ## Start full dev stack (postgres + Go server with hot reload + Vite
 	@trap 'kill 0' INT TERM; \
 		DATABASE_URL="postgres://postgres:postgres@localhost:5433/cordon?sslmode=disable" \
 		AUTH_MODE=static \
+		CORDON_INSECURE=true \
 		DEFAULT_TENANT_ID=00000000-0000-0000-0000-000000000001 \
 		go run github.com/air-verse/air@latest & \
 		cd web && npm install --silent && npm run dev & \
@@ -31,6 +32,7 @@ dev-db: ## Start only postgres + run migrations
 dev-server: ## Start Go server with hot reload (assumes postgres running)
 	DATABASE_URL="postgres://postgres:postgres@localhost:5433/cordon?sslmode=disable" \
 	AUTH_MODE=static \
+	CORDON_INSECURE=true \
 	DEFAULT_TENANT_ID=00000000-0000-0000-0000-000000000001 \
 	go run github.com/air-verse/air@latest
 

@@ -29,9 +29,15 @@ type ServerSettings struct {
 }
 
 type AuthSettings struct {
-	Mode            string // "static" or "token"
+	Mode            string // "static", "token", or "jwt"
 	DefaultTenantID string
 	APIToken        string // used when Mode == "token"
+	Insecure        bool   // required for Mode == "static" (prevents accidental prod use)
+
+	// JWT settings (used when Mode == "jwt")
+	JWKSURL     string // remote JWKS endpoint for key discovery
+	JWTAudience string // expected "aud" claim
+	TenantClaim string // JWT claim containing tenant UUID (default "tenant_id")
 }
 
 type DatabaseSettings struct {
@@ -96,6 +102,10 @@ func LoadServer() (*ServerConfig, error) {
 			Mode:            envOr("AUTH_MODE", "static"),
 			DefaultTenantID: envOr("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000001"),
 			APIToken:        envOr("API_TOKEN", "dev-token"),
+			Insecure:        os.Getenv("CORDON_INSECURE") == "true",
+			JWKSURL:         os.Getenv("CORDON_JWT_JWKS_URL"),
+			JWTAudience:     os.Getenv("CORDON_JWT_AUDIENCE"),
+			TenantClaim:     envOr("CORDON_JWT_TENANT_CLAIM", "tenant_id"),
 		},
 		Database: DatabaseSettings{
 			URL: envOr("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/cordon?sslmode=disable"),
@@ -156,8 +166,22 @@ func (c *ServerConfig) validate() error {
 	if c.Database.URL == "" {
 		return fmt.Errorf("DATABASE_URL must not be empty")
 	}
-	if c.Auth.Mode != "static" && c.Auth.Mode != "token" {
-		return fmt.Errorf("AUTH_MODE must be 'static' or 'token', got %q", c.Auth.Mode)
+	switch c.Auth.Mode {
+	case "static":
+		if !c.Auth.Insecure {
+			return fmt.Errorf("AUTH_MODE=static requires CORDON_INSECURE=true — this mode has NO authentication; set AUTH_MODE=jwt for production")
+		}
+	case "token":
+		// Valid, but main.go logs a warning at startup.
+	case "jwt":
+		if c.Auth.JWKSURL == "" {
+			return fmt.Errorf("AUTH_MODE=jwt requires CORDON_JWT_JWKS_URL")
+		}
+		if c.Auth.JWTAudience == "" {
+			return fmt.Errorf("AUTH_MODE=jwt requires CORDON_JWT_AUDIENCE")
+		}
+	default:
+		return fmt.Errorf("AUTH_MODE must be 'static', 'token', or 'jwt', got %q", c.Auth.Mode)
 	}
 	if c.Workspace.DefaultMaxLifetime < c.Workspace.MinLifetime {
 		return fmt.Errorf("CORDON_MAX_LIFETIME (%s) must be >= MinLifetime (%s)", c.Workspace.DefaultMaxLifetime, c.Workspace.MinLifetime)
