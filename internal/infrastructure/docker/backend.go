@@ -57,6 +57,11 @@ func (b *Backend) CreateContainer(ctx context.Context, opts ports.CreateContaine
 		Cmd:    []string{"sleep", "infinity"},
 	}
 
+	// Map string slices to Docker API strslice type for capabilities
+	var capDrop, capAdd []string
+	capDrop = append(capDrop, opts.CapDrop...)
+	capAdd = append(capAdd, opts.CapAdd...)
+
 	hostConfig := &container.HostConfig{
 		Resources: container.Resources{
 			CPUQuota: cpuQuota,
@@ -64,6 +69,9 @@ func (b *Backend) CreateContainer(ctx context.Context, opts ports.CreateContaine
 		},
 		NetworkMode: container.NetworkMode(opts.Network),
 		Mounts:      mounts,
+		CapDrop:     capDrop,
+		CapAdd:      capAdd,
+		SecurityOpt: opts.SecurityOpts,
 	}
 
 	resp, err := b.client.ContainerCreate(ctx, containerConfig, hostConfig, nil, nil, opts.Name)

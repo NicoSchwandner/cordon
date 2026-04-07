@@ -27,6 +27,11 @@ type CreateContainerOpts struct {
 	Network  string // network name or ID
 	CPU      int
 	MemoryMB int
+
+	// Security hardening
+	CapDrop      []string // Linux capabilities to drop (e.g., "ALL")
+	CapAdd       []string // Capabilities to add back after dropping ALL
+	SecurityOpts []string // Docker security options (e.g., "no-new-privileges")
 }
 
 // MountSpec describes a volume mount.

@@ -41,13 +41,16 @@ func (o *Orchestrator) createBare(ctx context.Context, tenantID uuid.UUID, confi
 	env = append(env, proxyEnv(internalProxyAddr)...)
 
 	if _, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
-		Name:     cName,
-		Image:    image,
-		Labels:   labels,
-		Env:      env,
-		Network:  networkName,
-		CPU:      config.CPU,
-		MemoryMB: config.MemoryMB,
+		Name:         cName,
+		Image:        image,
+		Labels:       labels,
+		Env:          env,
+		Network:      networkName,
+		CPU:          config.CPU,
+		MemoryMB:     config.MemoryMB,
+		CapDrop:      workspaceCapDrop(),
+		CapAdd:       workspaceCapAdd(),
+		SecurityOpts: workspaceSecurityOpts(),
 	}); err != nil {
 		o.backend.RemoveNetwork(ctx, networkName)
 		return domain.Workspace{}, err
@@ -144,13 +147,16 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 
 	// Create and start the container
 	handle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
-		Name:     cName,
-		Image:    result.ImageName,
-		Labels:   labels,
-		Env:      env,
-		Network:  networkName,
-		CPU:      config.CPU,
-		MemoryMB: config.MemoryMB,
+		Name:         cName,
+		Image:        result.ImageName,
+		Labels:       labels,
+		Env:          env,
+		Network:      networkName,
+		CPU:          config.CPU,
+		MemoryMB:     config.MemoryMB,
+		CapDrop:      workspaceCapDrop(),
+		CapAdd:       workspaceCapAdd(),
+		SecurityOpts: workspaceSecurityOpts(),
 	})
 	if err != nil {
 		if o.egress.Enabled {
@@ -279,13 +285,16 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 	env = append(env, proxyEnv(internalProxyAddr)...)
 
 	handle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
-		Name:     cName,
-		Image:    image,
-		Labels:   labels,
-		Env:      env,
-		Network:  networkName,
-		CPU:      config.CPU,
-		MemoryMB: config.MemoryMB,
+		Name:         cName,
+		Image:        image,
+		Labels:       labels,
+		Env:          env,
+		Network:      networkName,
+		CPU:          config.CPU,
+		MemoryMB:     config.MemoryMB,
+		CapDrop:      workspaceCapDrop(),
+		CapAdd:       workspaceCapAdd(),
+		SecurityOpts: workspaceSecurityOpts(),
 	})
 	if err != nil {
 		if o.egress.Enabled {
@@ -462,9 +471,12 @@ func (o *Orchestrator) startServiceContainers(ctx context.Context, primaryName, 
 				Source: volName,
 				Target: "/workspace/" + shortName,
 			}},
-			Network:  networkName,
-			CPU:      config.CPU,
-			MemoryMB: config.MemoryMB,
+			Network:      networkName,
+			CPU:          config.CPU,
+			MemoryMB:     config.MemoryMB,
+			CapDrop:      workspaceCapDrop(),
+			CapAdd:       workspaceCapAdd(),
+			SecurityOpts: workspaceSecurityOpts(),
 		})
 		if err != nil {
 			slog.Warn("service container start failed", "component", "workspace", "repo", shortName, "error", err)

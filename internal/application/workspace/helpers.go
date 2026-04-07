@@ -343,6 +343,19 @@ func handleToWorkspace(h ports.ContainerHandle) domain.Workspace {
 	return ws
 }
 
+// workspaceCapDrop returns the Linux capabilities to drop for workspace containers.
+// We drop ALL and selectively add back the minimum set needed for devcontainer
+// workflows (package installation, file ownership, port binding).
+func workspaceCapDrop() []string { return []string{"ALL"} }
+
+// workspaceCapAdd returns the minimal Linux capabilities for workspace containers.
+func workspaceCapAdd() []string {
+	return []string{"CHOWN", "DAC_OVERRIDE", "FOWNER", "SETGID", "SETUID", "NET_BIND_SERVICE"}
+}
+
+// workspaceSecurityOpts returns Docker security options for workspace containers.
+func workspaceSecurityOpts() []string { return []string{"no-new-privileges"} }
+
 func containerName(name string, wsID uuid.UUID) string {
 	return fmt.Sprintf("cordon-%s-%s", sanitizeName(name), wsID.String()[:8])
 }

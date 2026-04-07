@@ -363,13 +363,16 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 	env = append(env, proxyEnv(internalProxyAddr)...)
 
 	newHandle, err := o.backend.CreateContainer(ctx, ports.CreateContainerOpts{
-		Name:     cName,
-		Image:    result.ImageName,
-		Labels:   labels,
-		Env:      env,
-		Network:  networkName,
-		CPU:      2,
-		MemoryMB: 4096,
+		Name:         cName,
+		Image:        result.ImageName,
+		Labels:       labels,
+		Env:          env,
+		Network:      networkName,
+		CPU:          2,
+		MemoryMB:     4096,
+		CapDrop:      workspaceCapDrop(),
+		CapAdd:       workspaceCapAdd(),
+		SecurityOpts: workspaceSecurityOpts(),
 	})
 	if err != nil {
 		return fmt.Errorf("starting workspace container: %w", err)
