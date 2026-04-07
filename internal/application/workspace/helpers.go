@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"regexp"
 	"strings"
 	"time"
@@ -44,13 +44,13 @@ func (o *Orchestrator) configureGit(ctx context.Context, containerID, proxyAddr 
 	if placeholder, err := o.githubPlaceholder(ctx); err == nil {
 		credHelper := fmt.Sprintf(`git config --global credential.helper '!f() { echo "username=x-access-token"; echo "password=%s"; }; f'`, placeholder)
 		if _, err := o.backend.Exec(ctx, containerID, credHelper); err != nil {
-			log.Printf("[workspace] warning: git credential helper setup failed: %v", err)
+			slog.Warn("git credential helper setup failed", "component", "workspace", "error", err)
 		}
 	}
 	if o.gitUser != nil {
 		gitCfg := fmt.Sprintf(`git config --global user.name "%s" && git config --global user.email "%s"`, o.gitUser.Name, o.gitUser.Email)
 		if _, err := o.backend.Exec(ctx, containerID, gitCfg); err != nil {
-			log.Printf("[workspace] warning: git identity setup failed: %v", err)
+			slog.Warn("git identity setup failed", "component", "workspace", "error", err)
 		}
 	}
 	// Configure git to route through the Cordon proxy (same egress path as all
@@ -60,7 +60,7 @@ func (o *Orchestrator) configureGit(ctx context.Context, containerID, proxyAddr 
 		proxyURL := "http://" + proxyAddr
 		proxyCfg := fmt.Sprintf(`git config --global http.proxy %s`, proxyURL)
 		if _, err := o.backend.Exec(ctx, containerID, proxyCfg); err != nil {
-			log.Printf("[workspace] warning: git proxy setup failed: %v", err)
+			slog.Warn("git proxy setup failed", "component", "workspace", "error", err)
 		}
 	}
 }
@@ -79,11 +79,11 @@ func (o *Orchestrator) installCACert(ctx context.Context, containerID string) {
 CERT
 `, string(o.caPem))
 	if _, err := o.backend.Exec(ctx, containerID, writeCmd); err != nil {
-		log.Printf("[workspace] warning: CA cert write failed: %v", err)
+		slog.Warn("CA cert write failed", "component", "workspace", "error", err)
 		return
 	}
 	if _, err := o.backend.Exec(ctx, containerID, "update-ca-certificates --fresh 2>/dev/null || true"); err != nil {
-		log.Printf("[workspace] warning: CA cert install failed: %v", err)
+		slog.Warn("CA cert install failed", "component", "workspace", "error", err)
 	}
 }
 
@@ -141,17 +141,17 @@ func (o *Orchestrator) registerWorkspaceIP(ctx context.Context, containerID stri
 	}
 	output, err := o.backend.ExecWithOutput(ctx, containerID, "hostname -I")
 	if err != nil {
-		log.Printf("[workspace] warning: could not read container IP for registry: %v", err)
+		slog.Warn("could not read container IP for registry", "component", "workspace", "error", err)
 		return
 	}
 	// Extract IP from output — Docker exec may include binary stream headers,
 	// so we match an IPv4 pattern rather than trusting field splitting.
 	ip := extractIPv4(output)
 	if ip == "" {
-		log.Printf("[workspace] warning: could not parse container IP from output %q for workspace %s", output, wsID.String()[:8])
+		slog.Warn("could not parse container IP from output", "component", "workspace", "output", output, "workspace", wsID.String()[:8])
 		return
 	}
-	log.Printf("[workspace] registering container IP %s → workspace %s", ip, wsID.String()[:8])
+	slog.Info("registering container IP", "component", "workspace", "ip", ip, "workspace", wsID.String()[:8])
 	o.registry.Register(ip, wsID)
 }
 
@@ -280,7 +280,7 @@ export CORDON_TENANT_ID="%s"
 EOF`, wsID.String(), tenantID.String())
 	o.backend.Exec(ctx, cid, envCmd)
 
-	log.Printf("[workspace] routing layer installed (%d tool wrappers)", len(tools))
+	slog.Info("routing layer installed", "component", "workspace", "tool_wrappers", len(tools))
 }
 
 // handleToWorkspace converts a ContainerHandle (with labels) to a domain.Workspace.

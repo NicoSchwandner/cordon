@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -80,7 +80,7 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true, // Allow connections from any origin in dev
 	})
 	if err != nil {
-		log.Printf("websocket accept error: %v", err)
+		slog.Warn("websocket accept error", "component", "terminal", "error", err)
 		return
 	}
 	defer conn.Close(websocket.StatusNormalClosure, "")
@@ -96,7 +96,7 @@ func (h *TerminalHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			n, err := session.Read(buf)
 			if err != nil {
 				if err != io.EOF {
-					log.Printf("container read error: %v", err)
+					slog.Warn("container read error", "component", "terminal", "error", err)
 				}
 				return
 			}

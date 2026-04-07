@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -231,7 +231,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 				Config:    config,
 			}
 			if err := h.preparer.InsertPending(r.Context(), pending); err != nil {
-				log.Printf("[workspace] failed to persist pending workspace: %v", err)
+				slog.Error("failed to persist pending workspace", "component", "workspace", "error", err)
 			}
 		}
 
@@ -243,7 +243,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 			ws, err := h.service.Create(ctx, tenantID, config)
 			if err != nil {
-				log.Printf("[workspace] create failed: %v", err)
+				slog.Error("create failed", "component", "workspace", "error", err)
 			}
 			_ = ws
 			h.progress.Complete(wsID, err)
@@ -267,13 +267,13 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 			ExpiresAt: now.Add(config.MaxLifetime), Config: config,
 		}
 		if err := h.preparer.InsertPending(r.Context(), pending); err != nil {
-			log.Printf("[workspace] failed to persist pending workspace: %v", err)
+			slog.Error("failed to persist pending workspace", "component", "workspace", "error", err)
 		}
 	}
 
 	ws, err := h.service.Create(r.Context(), tenantID, config)
 	if err != nil {
-		log.Printf("[workspace] create failed: %v", err)
+		slog.Error("create failed", "component", "workspace", "error", err)
 		middleware.WriteProblem(w, domain.ProblemDetails{
 			Type: "https://cordon.dev/problems/workspace-create-failed", Title: "Create Failed",
 			Status: 500, Detail: err.Error(), Code: "workspace_create_failed",
@@ -598,7 +598,7 @@ func (h *WorkspaceHandler) Activate(w http.ResponseWriter, r *http.Request) {
 		var lastErr error
 		for _, repoURL := range urls {
 			if err := h.service.ActivateRepo(ctx, tenantID, wsID, repoURL); err != nil {
-				log.Printf("[workspace] activate %s failed: %v", repoURL, err)
+				slog.Error("activate failed", "component", "workspace", "repo_url", repoURL, "error", err)
 				lastErr = err
 			}
 		}
@@ -679,7 +679,7 @@ func (h *WorkspaceHandler) Extend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.ttl.SetExpiry(ws.ID, newExpiry)
-	log.Printf("[workspace] TTL extended for %s: new expiry %s", wsID.String()[:8], newExpiry.Format(time.RFC3339))
+	slog.Info("TTL extended", "component", "workspace", "workspace_id", wsID.String()[:8], "new_expiry", newExpiry.Format(time.RFC3339))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{

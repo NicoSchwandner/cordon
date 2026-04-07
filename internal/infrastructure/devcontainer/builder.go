@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -32,7 +32,7 @@ func NewBuilder() (*Builder, error) {
 	if err != nil {
 		return nil, fmt.Errorf("devcontainer CLI not found in PATH: %w", err)
 	}
-	log.Printf("[devcontainer] using CLI at %s", path)
+	slog.Info("using CLI", "component", "devcontainer", "path", path)
 	return &Builder{cliPath: path}, nil
 }
 
@@ -47,7 +47,7 @@ func (b *Builder) Build(ctx context.Context, repo, branch, token, devcontainerPa
 
 	// Clone the repo
 	cloneURL := injectToken(repo, token)
-	log.Printf("[devcontainer] cloning %s (branch=%s)", repo, branch)
+	slog.Info("cloning repo", "component", "devcontainer", "repo", repo, "branch", branch)
 
 	args := []string{"clone", "--depth", "1"}
 	if branch != "" {
@@ -64,7 +64,7 @@ func (b *Builder) Build(ctx context.Context, repo, branch, token, devcontainerPa
 	// Find or generate devcontainer.json
 	configPath := FindConfig(tmpDir, devcontainerPath)
 	if configPath == "" {
-		log.Printf("[devcontainer] no devcontainer.json found, generating default")
+		slog.Info("no devcontainer.json found, generating default", "component", "devcontainer")
 		generated, err := GenerateDefault(tmpDir)
 		if err != nil {
 			return nil, fmt.Errorf("generating default devcontainer.json: %w", err)
@@ -88,9 +88,9 @@ func (b *Builder) Build(ctx context.Context, repo, branch, token, devcontainerPa
 	imageTag := fmt.Sprintf("cordon-ws-%s", imageHash(repo, branch, configContent))
 	cached := imageExists(ctx, imageTag)
 	if cached {
-		log.Printf("[devcontainer] using cached image %s", imageTag)
+		slog.Info("using cached image", "component", "devcontainer", "image", imageTag)
 	} else {
-		log.Printf("[devcontainer] building image %s", imageTag)
+		slog.Info("building image", "component", "devcontainer", "image", imageTag)
 		buildCmd := exec.CommandContext(ctx, b.cliPath, "build",
 			"--workspace-folder", tmpDir,
 			"--image-name", imageTag,
@@ -99,7 +99,7 @@ func (b *Builder) Build(ctx context.Context, repo, branch, token, devcontainerPa
 		if out, err := buildCmd.CombinedOutput(); err != nil {
 			return nil, fmt.Errorf("devcontainer build failed: %w\n%s", err, out)
 		}
-		log.Printf("[devcontainer] image %s built successfully", imageTag)
+		slog.Info("image built successfully", "component", "devcontainer", "image", imageTag)
 	}
 
 	// Merge env maps, resolving devcontainer variable substitutions

@@ -2,7 +2,7 @@ package middleware
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 
 	"github.com/NicoSchwandner/cordon/internal/domain"
@@ -13,7 +13,7 @@ func Recovery(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				log.Printf("PANIC: %v", rec)
+				slog.Error("panic recovered", "error", rec, "method", r.Method, "path", r.URL.Path)
 				WriteProblem(w, domain.ProblemDetails{
 					Type:   "https://cordon.dev/problems/internal-error",
 					Title:  "Internal Server Error",

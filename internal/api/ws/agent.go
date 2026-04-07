@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -55,7 +55,7 @@ func (ac *agentConn) readLoop(ctx context.Context) {
 
 		var msg ExecMessage
 		if err := json.Unmarshal(data, &msg); err != nil {
-			log.Printf("[agent] invalid message from agent: %v", err)
+			slog.Warn("invalid message from agent", "component", "agent", "error", err)
 			continue
 		}
 
@@ -64,7 +64,7 @@ func (ac *agentConn) readLoop(ctx context.Context) {
 		ac.mu.Unlock()
 
 		if !ok {
-			log.Printf("[agent] response for unknown request %s", msg.ID)
+			slog.Warn("response for unknown request", "component", "agent", "request_id", msg.ID)
 			continue
 		}
 
@@ -212,11 +212,11 @@ func (h *AgentWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		InsecureSkipVerify: true,
 	})
 	if err != nil {
-		log.Printf("[agent] websocket accept error: %v", err)
+		slog.Warn("websocket accept error", "component", "agent", "error", err)
 		return
 	}
 
-	log.Printf("[agent] service container connected: ws=%s container=%s", wsID.String()[:8], containerName)
+	slog.Info("service container connected", "component", "agent", "workspace_id", wsID.String()[:8], "container", containerName)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -226,7 +226,7 @@ func (h *AgentWSHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		h.registry.Unregister(wsID, containerName)
 		conn.CloseNow()
-		log.Printf("[agent] service container disconnected: ws=%s container=%s", wsID.String()[:8], containerName)
+		slog.Info("service container disconnected", "component", "agent", "workspace_id", wsID.String()[:8], "container", containerName)
 	}()
 
 	// Block until context is done (client disconnects or server shuts down).

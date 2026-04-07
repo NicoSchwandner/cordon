@@ -3,7 +3,7 @@ package workspace
 import (
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 
 	"github.com/google/uuid"
 	"github.com/NicoSchwandner/cordon/internal/application/ports"
@@ -36,13 +36,13 @@ func (ps *PersistentService) Create(ctx context.Context, tenantID uuid.UUID, con
 	if err != nil {
 		// Mark as destroyed in the DB so it doesn't linger as "creating" forever.
 		if storeErr := ps.store.UpdateStatus(ctx, config.ID, domain.WorkspaceDestroyed); storeErr != nil {
-			log.Printf("[persistent] failed to mark workspace %s as destroyed after create failure: %v", config.ID.String()[:8], storeErr)
+			slog.Warn("failed to mark workspace as destroyed after create failure", "component", "persistent", "workspace", config.ID.String()[:8], "error", storeErr)
 		}
 		return ws, err
 	}
 
 	if storeErr := ps.store.UpdateStatus(ctx, config.ID, domain.WorkspaceRunning); storeErr != nil {
-		log.Printf("[persistent] failed to update workspace %s to running: %v", config.ID.String()[:8], storeErr)
+		slog.Warn("failed to update workspace to running", "component", "persistent", "workspace", config.ID.String()[:8], "error", storeErr)
 	}
 	return ws, nil
 }
@@ -101,7 +101,7 @@ func (ps *PersistentService) List(ctx context.Context, tenantID uuid.UUID) ([]do
 			result = append(result, dbWS)
 		} else if dbWS.Status == domain.WorkspaceRunning || dbWS.Status == domain.WorkspaceSuspended {
 			// DB says running/suspended but no Docker container — container was removed externally.
-			log.Printf("[persistent] workspace %s has no container, marking destroyed", dbWS.ID.String()[:8])
+			slog.Warn("workspace has no container, marking destroyed", "component", "persistent", "workspace", dbWS.ID.String()[:8])
 			ps.store.UpdateStatus(ctx, dbWS.ID, domain.WorkspaceDestroyed)
 			// Don't include in results.
 		}
@@ -121,7 +121,7 @@ func (ps *PersistentService) Suspend(ctx context.Context, tenantID, workspaceID 
 		return err
 	}
 	if err := ps.store.UpdateStatus(ctx, workspaceID, domain.WorkspaceSuspended); err != nil {
-		log.Printf("[persistent] failed to update workspace %s to suspended: %v", workspaceID.String()[:8], err)
+		slog.Warn("failed to update workspace to suspended", "component", "persistent", "workspace", workspaceID.String()[:8], "error", err)
 	}
 	return nil
 }
@@ -131,7 +131,7 @@ func (ps *PersistentService) Resume(ctx context.Context, tenantID, workspaceID u
 		return err
 	}
 	if err := ps.store.UpdateStatus(ctx, workspaceID, domain.WorkspaceRunning); err != nil {
-		log.Printf("[persistent] failed to update workspace %s to running: %v", workspaceID.String()[:8], err)
+		slog.Warn("failed to update workspace to running", "component", "persistent", "workspace", workspaceID.String()[:8], "error", err)
 	}
 	return nil
 }
@@ -141,7 +141,7 @@ func (ps *PersistentService) Destroy(ctx context.Context, tenantID, workspaceID 
 		return err
 	}
 	if err := ps.store.UpdateStatus(ctx, workspaceID, domain.WorkspaceDestroyed); err != nil {
-		log.Printf("[persistent] failed to update workspace %s to destroyed: %v", workspaceID.String()[:8], err)
+		slog.Warn("failed to update workspace to destroyed", "component", "persistent", "workspace", workspaceID.String()[:8], "error", err)
 	}
 	return nil
 }

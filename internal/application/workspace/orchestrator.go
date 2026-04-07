@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -73,15 +73,15 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		cloneConcurrency:   cloneConcurrency,
 	}
 	if o.egress.Enabled {
-		log.Printf("[workspace] network-level egress enforcement enabled (proxy=%s)", o.egress.ProxyAddr)
+		slog.Info("network-level egress enforcement enabled", "component", "workspace", "proxy", o.egress.ProxyAddr)
 	}
 
 	// Resolve git identity from hosting platform API
 	if cfg.GitHost != nil && cfg.GitHost.HasToken() {
 		if id, err := cfg.GitHost.FetchUser(); err != nil {
-			log.Printf("[workspace] warning: could not resolve git identity: %v", err)
+			slog.Warn("could not resolve git identity", "component", "workspace", "error", err)
 		} else {
-			log.Printf("[workspace] git identity: %s <%s>", id.Name, id.Email)
+			slog.Info("git identity resolved", "component", "workspace", "name", id.Name, "email", id.Email)
 			o.gitUser = id
 		}
 	}
@@ -91,7 +91,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 	defer cancel()
 	existing, _ := cfg.Backend.ListContainers(ctx, map[string]string{"cordon.workspace": ""})
 	if len(existing) > 0 {
-		log.Printf("[workspace] found %d existing cordon container(s) from previous run", len(existing))
+		slog.Info("found existing cordon containers from previous run", "component", "workspace", "count", len(existing))
 	}
 
 	return o
@@ -177,7 +177,7 @@ func (o *Orchestrator) Destroy(ctx context.Context, tenantID, workspaceID uuid.U
 		return fmt.Errorf("workspace not found")
 	}
 
-	log.Printf("[workspace] destroying workspace %s (%d containers)", workspaceID.String()[:8], len(handles))
+	slog.Info("destroying workspace", "component", "workspace", "workspace", workspaceID.String()[:8], "containers", len(handles))
 
 	var networkName string
 	for _, h := range handles {
@@ -186,15 +186,15 @@ func (o *Orchestrator) Destroy(ctx context.Context, tenantID, workspaceID uuid.U
 		}
 		svcFor := h.Labels["cordon.service-for"]
 		if svcFor != "" {
-			log.Printf("[workspace] removing service container for %s (%s)", svcFor, h.ID[:12])
+			slog.Info("removing service container", "component", "workspace", "service_for", svcFor, "container", h.ID[:12])
 		} else {
-			log.Printf("[workspace] removing primary container (%s)", h.ID[:12])
+			slog.Info("removing primary container", "component", "workspace", "container", h.ID[:12])
 			if h.Name != "" {
 				networkName = h.Name + "-net"
 			}
 		}
 		if err := o.backend.RemoveContainer(ctx, h.ID); err != nil {
-			log.Printf("[workspace] warning: container remove failed: %v", err)
+			slog.Warn("container remove failed", "component", "workspace", "error", err)
 		}
 	}
 
@@ -203,9 +203,9 @@ func (o *Orchestrator) Destroy(ctx context.Context, tenantID, workspaceID uuid.U
 			"cordon.workspace": workspaceID.String(),
 		})
 		for _, name := range volumes {
-			log.Printf("[workspace] removing volume %s", name)
+			slog.Info("removing volume", "component", "workspace", "volume", name)
 			if err := o.backend.RemoveVolume(ctx, name); err != nil {
-				log.Printf("[workspace] warning: volume remove failed: %v", err)
+				slog.Warn("volume remove failed", "component", "workspace", "error", err)
 			}
 		}
 	}
@@ -213,15 +213,15 @@ func (o *Orchestrator) Destroy(ctx context.Context, tenantID, workspaceID uuid.U
 	if networkName != "" {
 		if o.egress.Enabled {
 			if err := o.backend.RemoveProxyAccess(ctx, networkName); err != nil {
-				log.Printf("[workspace] warning: proxy access cleanup failed: %v", err)
+				slog.Warn("proxy access cleanup failed", "component", "workspace", "error", err)
 			}
 		}
 		if err := o.backend.RemoveNetwork(ctx, networkName); err != nil {
-			log.Printf("[workspace] warning: network remove failed: %v", err)
+			slog.Warn("network remove failed", "component", "workspace", "error", err)
 		}
 	}
 
-	log.Printf("[workspace] workspace destroyed")
+	slog.Info("workspace destroyed", "component", "workspace")
 	return nil
 }
 
@@ -391,7 +391,7 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 	for _, cmd := range result.PostCreateCommand {
 		shellCmd := fmt.Sprintf("cd %s && %s", cloneDir, cmd)
 		if _, err := o.backend.Exec(ctx, newHandle.ID, shellCmd); err != nil {
-			log.Printf("[workspace] warning: postCreateCommand for %s failed: %v", shortName, err)
+			slog.Warn("postCreateCommand failed", "component", "workspace", "repo", shortName, "error", err)
 		}
 	}
 
@@ -404,6 +404,6 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 	writeCmd := fmt.Sprintf(`echo '%s' > /workspace/.cordon/activated-repos.json`, string(activatedJSON))
 	o.backend.Exec(ctx, handle.ID, writeCmd)
 
-	log.Printf("[workspace] activated %s as workspace %s (spawned from investigation %s)", shortName, newWSID.String()[:8], workspaceID.String()[:8])
+	slog.Info("activated repo as workspace", "component", "workspace", "repo", shortName, "new_workspace", newWSID.String()[:8], "spawned_from", workspaceID.String()[:8])
 	return nil
 }

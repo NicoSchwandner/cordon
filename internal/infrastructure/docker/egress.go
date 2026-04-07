@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -37,7 +37,7 @@ const (
 func (b *Backend) EnsureProxyAccess(ctx context.Context, networkName string, proxyAddr string, labels map[string]string) (string, error) {
 	gwName := gatewayName(networkName)
 
-	log.Printf("[docker] ensuring proxy access: gateway=%s proxy=%s", gwName, proxyAddr)
+	slog.Info("ensuring proxy access", "component", "docker", "gateway", gwName, "proxy", proxyAddr)
 
 	// Pull the lightweight gateway image
 	if err := b.pullIfMissing(ctx, gatewayImage); err != nil {
@@ -130,10 +130,10 @@ exec haproxy -f /etc/haproxy/haproxy.cfg -db`, haproxyCfg)
 	// which takes a few seconds. Without this, workspace containers may try
 	// to connect before the gateway is ready.
 	if err := b.waitForGatewayReady(ctx, resp.ID, 60*time.Second); err != nil {
-		log.Printf("[docker] warning: gateway readiness check failed: %v", err)
+		slog.Warn("gateway readiness check failed", "component", "docker", "error", err)
 	}
 
-	log.Printf("[docker] gateway %s ready, workspace proxy addr: %s", gwName, internalAddr)
+	slog.Info("gateway ready", "component", "docker", "gateway", gwName, "workspace_proxy_addr", internalAddr)
 	return internalAddr, nil
 }
 
@@ -144,14 +144,14 @@ func (b *Backend) RemoveProxyAccess(ctx context.Context, networkName string) err
 
 	// Remove gateway container
 	if err := b.client.ContainerRemove(ctx, gwName, container.RemoveOptions{Force: true}); err != nil {
-		log.Printf("[docker] warning: gateway container remove failed: %v", err)
+		slog.Warn("gateway container remove failed", "component", "docker", "error", err)
 	} else {
-		log.Printf("[docker] removed gateway container %s", gwName)
+		slog.Info("removed gateway container", "component", "docker", "gateway", gwName)
 	}
 
 	// Remove external network
 	if err := b.client.NetworkRemove(ctx, extNetName); err != nil {
-		log.Printf("[docker] warning: gateway network remove failed: %v", err)
+		slog.Warn("gateway network remove failed", "component", "docker", "error", err)
 	}
 
 	return nil

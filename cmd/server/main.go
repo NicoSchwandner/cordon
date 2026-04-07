@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -38,6 +39,15 @@ func main() {
 		log.Fatalf("loading config: %v", err)
 	}
 
+	// Structured logging: JSON in production, text in development.
+	var logHandler slog.Handler
+	if os.Getenv("CORDON_LOG_FORMAT") == "json" {
+		logHandler = slog.NewJSONHandler(os.Stdout, nil)
+	} else {
+		logHandler = slog.NewTextHandler(os.Stdout, nil)
+	}
+	slog.SetDefault(slog.New(logHandler))
+
 	ctx := context.Background()
 
 	// Database
@@ -48,7 +58,7 @@ func main() {
 	defer pool.Close()
 
 	if err := pool.Ping(ctx); err != nil {
-		log.Printf("WARNING: database not reachable: %v", err)
+		slog.Warn("database not reachable", "error", err)
 	}
 
 	// Infrastructure
@@ -64,13 +74,13 @@ func main() {
 	var dcBuilder *devcontainer.Builder
 	dcBuilder, err = devcontainer.NewBuilder()
 	if err != nil {
-		log.Printf("WARNING: devcontainer CLI not available, repo-based workspaces disabled: %v", err)
+		slog.Warn("devcontainer CLI not available, repo-based workspaces disabled", "error", err)
 	}
 
 	// GitHub token — read from config, register as secret.
 	// Users can also register/update via POST /api/secrets at runtime.
 	if cfg.Secrets.GitHubToken != "" {
-		log.Printf("GITHUB_TOKEN configured — private repo cloning enabled")
+		slog.Info("GITHUB_TOKEN configured — private repo cloning enabled")
 		vault.AddSecret(tenantID, "GITHUB_TOKEN", "PLACEHOLDER_GITHUB_TOKEN", cfg.Secrets.GitHubToken)
 	}
 
@@ -91,7 +101,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("creating MITM CA: %v", err)
 	}
-	log.Printf("MITM CA ready (%d byte cert)", len(ca.PEM()))
+	slog.Info("MITM CA ready", "cert_bytes", len(ca.PEM()))
 
 	// Workspace registry — maps gateway IPs to workspace IDs so the CONNECT
 	// handler can attribute MITM traffic to the originating workspace.
@@ -101,7 +111,7 @@ func main() {
 	var orchestrator *workspace.Orchestrator
 	dockerBackend, err := docker.NewBackend()
 	if err != nil {
-		log.Printf("WARNING: Docker not available, workspace features disabled: %v", err)
+		slog.Warn("Docker not available, workspace features disabled", "error", err)
 	} else {
 		// Wrap concrete types in port adapters
 		var builder ports.ImageBuilder
@@ -115,7 +125,7 @@ func main() {
 			ProxyAddr: cfg.Egress.ProxyAddr,
 		}
 		if !cfg.Egress.Enforce {
-			log.Println("WARNING: Network-level egress enforcement DISABLED (CORDON_EGRESS_ENFORCE=false). Workspace containers can reach any host.")
+			slog.Warn("network-level egress enforcement DISABLED, workspace containers can reach any host", "env", "CORDON_EGRESS_ENFORCE=false")
 		}
 
 		orchestrator = workspace.NewOrchestrator(workspace.OrchestratorConfig{
@@ -281,7 +291,7 @@ func main() {
 		sigCh := make(chan os.Signal, 1)
 		signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 		<-sigCh
-		log.Println("Shutting down...")
+		slog.Info("shutting down")
 		if reaperCancel != nil {
 			reaperCancel()
 		}
@@ -299,7 +309,7 @@ func main() {
 	}
 	ppListener := proxyproto.NewListener(ln)
 
-	log.Printf("Cordon server starting on :%s (auth=%s, workspaces=%v)", cfg.Server.Port, cfg.Auth.Mode, orchestrator != nil)
+	slog.Info("Cordon server starting", "port", cfg.Server.Port, "auth", cfg.Auth.Mode, "workspaces", orchestrator != nil)
 	if err := server.Serve(ppListener); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}

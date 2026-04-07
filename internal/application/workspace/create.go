@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -22,7 +22,7 @@ func (o *Orchestrator) createBare(ctx context.Context, tenantID uuid.UUID, confi
 	cName := containerName(config.Name, wsID)
 	now := time.Now().UTC()
 
-	log.Printf("[workspace] creating bare container %s (tenant=%s)", cName, tenantID.String()[:8])
+	slog.Info("creating bare container", "component", "workspace", "container", cName, "tenant", tenantID.String()[:8])
 
 	networkName := cName + "-net"
 	internalProxyAddr, err := o.createIsolatedNetwork(ctx, networkName, tenantID, wsID)
@@ -96,7 +96,7 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 		}
 	}
 
-	log.Printf("[workspace] creating devcontainer %s from %s (%d repos)", cName, primary.URL, len(config.Repos))
+	slog.Info("creating devcontainer", "component", "workspace", "container", cName, "repo", primary.URL, "repo_count", len(config.Repos))
 
 	// Build devcontainer image from the primary repo's base branch
 	emit("building_image", "Building devcontainer image...")
@@ -202,10 +202,10 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 	}
 	primaryDir := "/workspace/" + domain.RepoShortName(primary.URL)
 	for _, cmd := range result.PostCreateCommand {
-		log.Printf("[workspace] running postCreateCommand: %s", cmd)
+		slog.Info("running postCreateCommand", "component", "workspace", "cmd", cmd)
 		shellCmd := fmt.Sprintf("cd %s && %s", primaryDir, cmd)
 		if _, err := o.backend.Exec(ctx, cid, shellCmd); err != nil {
-			log.Printf("[workspace] warning: postCreateCommand failed: %v", err)
+			slog.Warn("postCreateCommand failed", "component", "workspace", "error", err)
 		}
 	}
 
@@ -214,7 +214,7 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 		o.progress.Timing().Record(primary.URL, time.Since(start))
 	}
 
-	log.Printf("[workspace] %s is ready (%d repos, %d service containers)", cName, len(config.Repos), len(serviceContainers))
+	slog.Info("workspace is ready", "component", "workspace", "container", cName, "repo_count", len(config.Repos), "service_containers", len(serviceContainers))
 	return ws, nil
 }
 
@@ -251,7 +251,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 		return domain.Workspace{}, fmt.Errorf("no non-archived repos found in org %s", org)
 	}
 
-	log.Printf("[workspace] creating investigation workspace %s from %s (%d repos)", cName, org, len(repoURLs))
+	slog.Info("creating investigation workspace", "component", "workspace", "container", cName, "org", org, "repo_count", len(repoURLs))
 
 	image := "mcr.microsoft.com/devcontainers/base:ubuntu"
 	emit("pulling_image", "Pulling base image...")
@@ -329,7 +329,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 			cloneURL := o.cloneURL(u)
 			cloneCmd := fmt.Sprintf("GIT_LFS_SKIP_SMUDGE=1 git clone --depth=1 --single-branch %s /workspace/%s", cloneURL, shortName)
 			if _, err := o.backend.Exec(ctx, cid, cloneCmd); err != nil {
-				log.Printf("[workspace] warning: shallow clone of %s failed: %v", u, err)
+				slog.Warn("shallow clone failed", "component", "workspace", "repo", u, "error", err)
 				failedMu.Lock()
 				failed = append(failed, shortName)
 				failedMu.Unlock()
@@ -342,7 +342,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 	wg.Wait()
 
 	if len(failed) > 0 {
-		log.Printf("[workspace] %d repos failed to clone: %v", len(failed), failed)
+		slog.Warn("repos failed to clone", "component", "workspace", "count", len(failed), "repos", failed)
 	}
 
 	// Install ripgrep for fast search
@@ -369,7 +369,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 	}
 
 	cloned := total - len(failed)
-	log.Printf("[workspace] investigation workspace %s ready (%d/%d repos cloned)", cName, cloned, total)
+	slog.Info("investigation workspace ready", "component", "workspace", "container", cName, "cloned", cloned, "total", total)
 	return ws, nil
 }
 
@@ -382,24 +382,24 @@ func (o *Orchestrator) cloneRepos(ctx context.Context, cid string, repos []domai
 		emit("cloning_repo", fmt.Sprintf("Cloning %s (branch: %s)...", shortName, repo.Branch))
 
 		cloneURL := o.cloneURL(repo.URL)
-		log.Printf("[workspace] cloning %s into %s (branch=%s)", repo.URL, cloneDir, repo.Branch)
+		slog.Info("cloning repo", "component", "workspace", "repo", repo.URL, "dir", cloneDir, "branch", repo.Branch)
 
 		cloneCmd := fmt.Sprintf("git clone --branch %s %s %s 2>&1", repo.Branch, cloneURL, cloneDir)
 		if output, err := o.backend.ExecWithOutput(ctx, cid, cloneCmd); err != nil {
 			if repo.Branch != repo.BaseBranch {
-				log.Printf("[workspace] branch %s not found, cloning %s and creating branch", repo.Branch, repo.BaseBranch)
+				slog.Info("branch not found, cloning base and creating branch", "component", "workspace", "branch", repo.Branch, "base_branch", repo.BaseBranch)
 				emit("cloning_repo", fmt.Sprintf("Branch %s not found, cloning %s...", repo.Branch, repo.BaseBranch))
 				fallbackCmd := fmt.Sprintf("git clone --branch %s %s %s 2>&1", repo.BaseBranch, cloneURL, cloneDir)
 				if output, err := o.backend.ExecWithOutput(ctx, cid, fallbackCmd); err != nil {
-					log.Printf("[workspace] warning: clone of %s failed: %v\n%s", repo.URL, err, redactToken(output, tokenForRedaction))
+					slog.Warn("clone failed", "component", "workspace", "repo", repo.URL, "error", err, "output", redactToken(output, tokenForRedaction))
 				} else {
 					checkoutCmd := fmt.Sprintf("cd %s && git checkout -b %s", cloneDir, repo.Branch)
 					if _, err := o.backend.Exec(ctx, cid, checkoutCmd); err != nil {
-						log.Printf("[workspace] warning: creating branch %s failed: %v", repo.Branch, err)
+						slog.Warn("creating branch failed", "component", "workspace", "branch", repo.Branch, "error", err)
 					}
 				}
 			} else {
-				log.Printf("[workspace] warning: clone of %s failed: %v\n%s", repo.URL, err, redactToken(output, tokenForRedaction))
+				slog.Warn("clone failed", "component", "workspace", "repo", repo.URL, "error", err, "output", redactToken(output, tokenForRedaction))
 			}
 		}
 	}
@@ -419,7 +419,7 @@ func (o *Orchestrator) startServiceContainers(ctx context.Context, primaryName, 
 		svcToken, _ := o.githubToken(ctx)
 		svcResult, err := o.builder.Build(ctx, repo.URL, repo.BaseBranch, svcToken, dcPath)
 		if err != nil {
-			log.Printf("[workspace] warning: service container build for %s failed: %v", shortName, err)
+			slog.Warn("service container build failed", "component", "workspace", "repo", shortName, "error", err)
 			continue
 		}
 		if svcResult.Cached {
@@ -431,7 +431,7 @@ func (o *Orchestrator) startServiceContainers(ctx context.Context, primaryName, 
 			"cordon.workspace": wsID.String(),
 			"cordon.repo":     shortName,
 		}); err != nil {
-			log.Printf("[workspace] warning: volume create for %s failed: %v", shortName, err)
+			slog.Warn("volume create failed", "component", "workspace", "repo", shortName, "error", err)
 			continue
 		}
 
@@ -467,7 +467,7 @@ func (o *Orchestrator) startServiceContainers(ctx context.Context, primaryName, 
 			MemoryMB: config.MemoryMB,
 		})
 		if err != nil {
-			log.Printf("[workspace] warning: service container start for %s failed: %v", shortName, err)
+			slog.Warn("service container start failed", "component", "workspace", "repo", shortName, "error", err)
 			continue
 		}
 
@@ -475,18 +475,18 @@ func (o *Orchestrator) startServiceContainers(ctx context.Context, primaryName, 
 		cloneDir := "/workspace/" + shortName
 		cloneCmd := fmt.Sprintf("git clone --branch %s %s %s", repo.Branch, cloneURL, cloneDir)
 		if _, err := o.backend.Exec(ctx, svcHandle.ID, cloneCmd); err != nil {
-			log.Printf("[workspace] warning: clone into service container %s failed: %v", shortName, err)
+			slog.Warn("clone into service container failed", "component", "workspace", "repo", shortName, "error", err)
 		}
 
 		for _, cmd := range svcResult.PostCreateCommand {
 			shellCmd := fmt.Sprintf("cd %s && %s", cloneDir, cmd)
 			if _, err := o.backend.Exec(ctx, svcHandle.ID, shellCmd); err != nil {
-				log.Printf("[workspace] warning: service postCreateCommand for %s failed: %v", shortName, err)
+				slog.Warn("service postCreateCommand failed", "component", "workspace", "repo", shortName, "error", err)
 			}
 		}
 
 		serviceContainers[shortName] = svcContainerName
-		log.Printf("[workspace] service container %s is running for repo %s", svcContainerName, shortName)
+		slog.Info("service container running", "component", "workspace", "container", svcContainerName, "repo", shortName)
 	}
 	return serviceContainers
 }

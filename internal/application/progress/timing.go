@@ -2,7 +2,7 @@ package progress
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sort"
@@ -71,13 +71,13 @@ func (ts *TimingStore) load() {
 		return // file doesn't exist yet
 	}
 	if err := json.Unmarshal(data, &ts.durations); err != nil {
-		log.Printf("[progress] warning: could not parse timing file: %v", err)
+		slog.Warn("could not parse timing file", "component", "progress", "error", err)
 	}
 }
 
 func (ts *TimingStore) save() {
 	if err := os.MkdirAll(filepath.Dir(ts.path), 0o755); err != nil {
-		log.Printf("[progress] warning: could not create timing directory: %v", err)
+		slog.Warn("could not create timing directory", "component", "progress", "error", err)
 		return
 	}
 	data, err := json.MarshalIndent(ts.durations, "", "  ")
@@ -85,6 +85,6 @@ func (ts *TimingStore) save() {
 		return
 	}
 	if err := os.WriteFile(ts.path, data, 0o644); err != nil {
-		log.Printf("[progress] warning: could not save timing file: %v", err)
+		slog.Warn("could not save timing file", "component", "progress", "error", err)
 	}
 }

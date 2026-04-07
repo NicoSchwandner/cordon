@@ -6,7 +6,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -62,7 +62,7 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	hostname := stripPort(host)
 
 	if !h.egress.IsAllowed(host) {
-		log.Printf("[connect] egress denied: %s", host)
+		slog.Warn("egress denied", "component", "connect", "host", host)
 		http.Error(w, "egress denied: "+host+" not in allowlist", http.StatusForbidden)
 		return
 	}
@@ -75,7 +75,7 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	clientConn, _, err := hijacker.Hijack()
 	if err != nil {
-		log.Printf("[connect] hijack failed: %v", err)
+		slog.Error("hijack failed", "component", "connect", "error", err)
 		return
 	}
 
@@ -86,7 +86,7 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if h.registry != nil {
 		wsID = h.registry.Lookup(remoteIP)
 		if wsID == uuid.Nil {
-			log.Printf("[connect] no workspace found for remote IP %s (raw: %s)", remoteIP, r.RemoteAddr)
+			slog.Warn("no workspace found for remote IP", "component", "connect", "remote_ip", remoteIP, "raw_addr", r.RemoteAddr)
 		}
 	}
 
@@ -94,7 +94,7 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	cert, err := h.ca.CertForHost(hostname)
 	if err != nil {
-		log.Printf("[connect] cert generation failed for %s: %v", hostname, err)
+		slog.Error("cert generation failed", "component", "connect", "hostname", hostname, "error", err)
 		clientConn.Close()
 		return
 	}
@@ -103,26 +103,26 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		Certificates: []tls.Certificate{*cert},
 	})
 	if err := tlsConn.Handshake(); err != nil {
-		log.Printf("[connect] TLS handshake failed for %s: %v", hostname, err)
+		slog.Error("TLS handshake failed", "component", "connect", "hostname", hostname, "error", err)
 		clientConn.Close()
 		return
 	}
 	defer tlsConn.Close()
 
-	log.Printf("[connect] MITM tunnel established: %s", host)
+	slog.Info("MITM tunnel established", "component", "connect", "host", host)
 
 	reader := bufio.NewReader(tlsConn)
 	for {
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			if err != io.EOF {
-				log.Printf("[connect] read request error for %s: %v", host, err)
+				slog.Error("read request error", "component", "connect", "host", host, "error", err)
 			}
 			return
 		}
 
 		if err := h.proxyRequest(tlsConn, req, hostname, host, wsID); err != nil {
-			log.Printf("[connect] proxy error for %s: %v", host, err)
+			slog.Error("proxy error", "component", "connect", "host", host, "error", err)
 			return
 		}
 	}
@@ -131,7 +131,7 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // proxyRequest runs a single intercepted HTTP request through the pipeline
 // and writes the upstream response back to the client's TLS connection.
 func (h *ConnectHandler) proxyRequest(tlsConn *tls.Conn, req *http.Request, hostname, hostPort string, wsID uuid.UUID) error {
-	log.Printf("[connect] %s %s %s", req.Method, hostname, req.URL.RequestURI())
+	slog.Info("proxying request", "component", "connect", "method", req.Method, "hostname", hostname, "uri", req.URL.RequestURI())
 
 	// Handle Expect: 100-continue — git uses this for POST /git-upload-pack.
 	// The client won't send the body until we acknowledge with 100 Continue.
@@ -179,7 +179,7 @@ func (h *ConnectHandler) proxyRequest(tlsConn *tls.Conn, req *http.Request, host
 			statusCode = resp.Problem.Status
 			detail = resp.Problem.Detail
 		}
-		log.Printf("[connect] blocked: %s %s → %d %s", req.Method, hostname+req.URL.RequestURI(), statusCode, detail)
+		slog.Warn("blocked", "component", "connect", "method", req.Method, "url", hostname+req.URL.RequestURI(), "status", statusCode, "detail", detail)
 		httpResp := &http.Response{
 			StatusCode: statusCode,
 			ProtoMajor: 1, ProtoMinor: 1,
@@ -210,7 +210,7 @@ func (h *ConnectHandler) proxyRequest(tlsConn *tls.Conn, req *http.Request, host
 
 	upstreamResp, err := h.client.Do(upstreamReq)
 	if err != nil {
-		log.Printf("[connect] upstream error: %s %s: %v", modified.Method, hostname+modified.Path, err)
+		slog.Error("upstream error", "component", "connect", "method", modified.Method, "url", hostname+modified.Path, "error", err)
 		writeErrorResponse(tlsConn, 502, "upstream request failed")
 		return fmt.Errorf("upstream request: %w", err)
 	}
@@ -220,7 +220,7 @@ func (h *ConnectHandler) proxyRequest(tlsConn *tls.Conn, req *http.Request, host
 	upstreamResp.ProtoMajor = 1
 	upstreamResp.ProtoMinor = 1
 
-	log.Printf("[connect] %s %s → %d", req.Method, hostname+req.URL.RequestURI(), upstreamResp.StatusCode)
+	slog.Info("upstream response", "component", "connect", "method", req.Method, "url", hostname+req.URL.RequestURI(), "status", upstreamResp.StatusCode)
 
 	return upstreamResp.Write(tlsConn)
 }

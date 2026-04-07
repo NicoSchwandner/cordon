@@ -2,7 +2,7 @@ package workspace
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -98,14 +98,14 @@ func NewReaper(backend ports.ComputeBackend, svc WorkspaceLifecycleService, lm *
 
 // Start runs the reaper loop until the context is cancelled.
 func (r *Reaper) Start(ctx context.Context) {
-	log.Printf("[reaper] started (interval=%s, idle_timeout=%s)", r.interval, r.lm.idleTimeout)
+	slog.Info("reaper started", "component", "reaper", "interval", r.interval, "idle_timeout", r.lm.idleTimeout)
 	ticker := time.NewTicker(r.interval)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[reaper] stopped")
+			slog.Info("reaper stopped", "component", "reaper")
 			return
 		case <-ticker.C:
 			r.tick(ctx)
@@ -116,7 +116,7 @@ func (r *Reaper) Start(ctx context.Context) {
 func (r *Reaper) tick(ctx context.Context) {
 	handles, err := r.backend.ListContainers(ctx, map[string]string{"cordon.workspace": ""})
 	if err != nil {
-		log.Printf("[reaper] error listing containers: %v", err)
+		slog.Warn("error listing containers", "component", "reaper", "error", err)
 		return
 	}
 
@@ -139,9 +139,9 @@ func (r *Reaper) tick(ctx context.Context) {
 
 		// Check max lifetime → destroy
 		if now.After(effectiveExpiry) {
-			log.Printf("[reaper] workspace %s expired (expires=%s), destroying", ws.ID.String()[:8], effectiveExpiry.Format(time.RFC3339))
+			slog.Info("workspace expired, destroying", "component", "reaper", "workspace", ws.ID.String()[:8], "expires", effectiveExpiry.Format(time.RFC3339))
 			if err := r.svc.Destroy(ctx, ws.TenantID, ws.ID); err != nil {
-				log.Printf("[reaper] destroy failed for %s: %v", ws.ID.String()[:8], err)
+				slog.Warn("destroy failed", "component", "reaper", "workspace", ws.ID.String()[:8], "error", err)
 			}
 			r.lm.Remove(ws.ID)
 			continue
@@ -165,9 +165,9 @@ func (r *Reaper) tick(ctx context.Context) {
 		}
 
 		if now.Sub(lastActivity) > r.lm.idleTimeout {
-			log.Printf("[reaper] workspace %s idle since %s, suspending", ws.ID.String()[:8], lastActivity.Format(time.RFC3339))
+			slog.Info("workspace idle, suspending", "component", "reaper", "workspace", ws.ID.String()[:8], "last_activity", lastActivity.Format(time.RFC3339))
 			if err := r.svc.Suspend(ctx, ws.TenantID, ws.ID); err != nil {
-				log.Printf("[reaper] suspend failed for %s: %v", ws.ID.String()[:8], err)
+				slog.Warn("suspend failed", "component", "reaper", "workspace", ws.ID.String()[:8], "error", err)
 			}
 		}
 	}

@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -71,12 +71,12 @@ func (b *Backend) CreateContainer(ctx context.Context, opts ports.CreateContaine
 		return ports.ContainerHandle{}, fmt.Errorf("creating container: %w", err)
 	}
 
-	log.Printf("[docker] starting container %s", resp.ID[:12])
+	slog.Info("starting container", "component", "docker", "container_id", resp.ID[:12])
 	if err := b.client.ContainerStart(ctx, resp.ID, container.StartOptions{}); err != nil {
 		b.client.ContainerRemove(ctx, resp.ID, container.RemoveOptions{Force: true})
 		return ports.ContainerHandle{}, fmt.Errorf("starting container: %w", err)
 	}
-	log.Printf("[docker] %s is running (container=%s)", opts.Name, resp.ID[:12])
+	slog.Info("container is running", "component", "docker", "name", opts.Name, "container_id", resp.ID[:12])
 
 	return ports.ContainerHandle{
 		ID:     resp.ID,
@@ -220,15 +220,15 @@ func (b *Backend) OpenTerminal(ctx context.Context, id string, opts ports.Termin
 }
 
 func (b *Backend) PullImage(ctx context.Context, image string) error {
-	log.Printf("[docker] ensuring image %s is available...", image)
+	slog.Info("ensuring image is available", "component", "docker", "image", image)
 	reader, err := b.client.ImagePull(ctx, image, dockerimage.PullOptions{})
 	if err != nil {
-		log.Printf("[docker] image pull skipped (may already exist): %v", err)
+		slog.Warn("image pull skipped, may already exist", "component", "docker", "error", err)
 		return nil // non-fatal — image may already exist locally
 	}
 	_, _ = io.Copy(io.Discard, reader)
 	reader.Close()
-	log.Printf("[docker] image ready")
+	slog.Info("image ready", "component", "docker")
 	return nil
 }
 
@@ -242,7 +242,7 @@ func (b *Backend) CreateNetwork(ctx context.Context, name string, labels map[str
 		return "", fmt.Errorf("creating network: %w", err)
 	}
 	if internal {
-		log.Printf("[docker] created internal network %s (no external routing)", name)
+		slog.Info("created internal network, no external routing", "component", "docker", "network", name)
 	}
 	return resp.ID, nil
 }
