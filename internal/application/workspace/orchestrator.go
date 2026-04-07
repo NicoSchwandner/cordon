@@ -26,7 +26,8 @@ type Orchestrator struct {
 	progress         *progress.Store         // optional progress event emitter
 	egress           domain.EgressPolicy     // network-level egress enforcement
 	caPem            []byte                  // MITM CA cert PEM for container trust store injection
-	registry         ports.WorkspaceRegistry // maps gateway IPs to workspace IDs
+	registry         ports.WorkspaceRegistry     // maps gateway IPs to workspace IDs
+	egressManager    ports.EgressPolicyManager   // per-workspace egress policy registration
 	defaultMaxLifetime time.Duration
 	cloneConcurrency   int
 }
@@ -44,7 +45,8 @@ type OrchestratorConfig struct {
 	Progress           *progress.Store
 	Egress             domain.EgressPolicy
 	CAPem              []byte                  // MITM CA certificate to inject into containers
-	Registry           ports.WorkspaceRegistry // maps gateway IPs to workspace IDs for CONNECT handler
+	Registry           ports.WorkspaceRegistry     // maps gateway IPs to workspace IDs for CONNECT handler
+	EgressManager      ports.EgressPolicyManager   // per-workspace egress policy registration (nil-safe)
 	DefaultMaxLifetime time.Duration
 	CloneConcurrency   int
 }
@@ -69,6 +71,7 @@ func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
 		egress:             cfg.Egress,
 		caPem:              cfg.CAPem,
 		registry:           cfg.Registry,
+		egressManager:      cfg.EgressManager,
 		defaultMaxLifetime: defaultMaxLifetime,
 		cloneConcurrency:   cloneConcurrency,
 	}
@@ -136,7 +139,7 @@ func (o *Orchestrator) List(ctx context.Context, tenantID uuid.UUID) ([]domain.W
 
 	result := make([]domain.Workspace, 0, len(handles))
 	for _, h := range handles {
-		if h.Labels["cordon.service-for"] != "" || h.Labels["cordon.egress-gateway"] != "" {
+		if h.ServiceFor != "" || h.IsGateway {
 			continue
 		}
 		result = append(result, handleToWorkspace(h))
@@ -181,16 +184,16 @@ func (o *Orchestrator) Destroy(ctx context.Context, tenantID, workspaceID uuid.U
 
 	var networkName string
 	for _, h := range handles {
-		if h.Labels["cordon.egress-gateway"] != "" {
+		if h.IsGateway {
 			continue // gateway containers are cleaned up via RemoveProxyAccess
 		}
-		svcFor := h.Labels["cordon.service-for"]
+		svcFor := h.ServiceFor
 		if svcFor != "" {
 			slog.Info("removing service container", "component", "workspace", "service_for", svcFor, "container", h.ID[:12])
 		} else {
 			slog.Info("removing primary container", "component", "workspace", "container", h.ID[:12])
-			if h.Name != "" {
-				networkName = h.Name + "-net"
+			if h.NetworkName != "" {
+				networkName = h.NetworkName
 			}
 		}
 		if err := o.backend.RemoveContainer(ctx, h.ID); err != nil {
@@ -221,6 +224,8 @@ func (o *Orchestrator) Destroy(ctx context.Context, tenantID, workspaceID uuid.U
 		}
 	}
 
+	o.removeEgressPolicy(workspaceID)
+
 	slog.Info("workspace destroyed", "component", "workspace")
 	return nil
 }
@@ -244,12 +249,11 @@ func (o *Orchestrator) ExecInRepo(ctx context.Context, workspaceID uuid.UUID, re
 
 	var targetID string
 	for _, h := range handles {
-		svcFor := h.Labels["cordon.service-for"]
-		if repoName != "" && svcFor == repoName {
+		if repoName != "" && h.ServiceFor == repoName {
 			targetID = h.ID
 			break
 		}
-		if svcFor == "" {
+		if h.ServiceFor == "" {
 			if repoName == "" {
 				targetID = h.ID
 				break
@@ -298,14 +302,11 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 		return fmt.Errorf("finding workspace: %w", err)
 	}
 
-	if handle.Labels["cordon.mode"] != string(domain.WorkspaceModeInvestigation) {
+	if handle.Mode != string(domain.WorkspaceModeInvestigation) {
 		return fmt.Errorf("workspace is not an investigation workspace")
 	}
 
-	var shallowRepos []string
-	if sr := handle.Labels["cordon.shallow-repos"]; sr != "" {
-		json.Unmarshal([]byte(sr), &shallowRepos)
-	}
+	shallowRepos := handle.ShallowRepos
 	found := false
 	for _, u := range shallowRepos {
 		if u == repoURL || domain.RepoShortName(u) == repoURL {
@@ -347,7 +348,7 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 
 	emit("creating_workspace", fmt.Sprintf("Starting workspace for %s...", shortName))
 
-	networkName := cName + "-net"
+	networkName := workspaceNetworkName(cName)
 	internalProxyAddr, err := o.createIsolatedNetwork(ctx, networkName, tenantID, newWSID)
 	if err != nil {
 		return err

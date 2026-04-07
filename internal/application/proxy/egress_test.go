@@ -1,6 +1,10 @@
 package proxy
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/google/uuid"
+)
 
 func TestEgressChecker(t *testing.T) {
 	checker := NewEgressChecker([]string{
@@ -49,5 +53,54 @@ func TestEgressCheckerEmptyAllowlist(t *testing.T) {
 	checker := NewEgressChecker(nil)
 	if checker.IsAllowed("anything.com") {
 		t.Error("empty allowlist should block everything")
+	}
+}
+
+func TestEgressCheckerWorkspacePolicy(t *testing.T) {
+	checker := NewEgressChecker([]string{"github.com"})
+	wsID := uuid.New()
+
+	// Before policy: only global hosts allowed
+	if !checker.IsAllowedForWorkspace("github.com", wsID) {
+		t.Error("global host should be allowed for any workspace")
+	}
+	if checker.IsAllowedForWorkspace("custom-api.internal.com", wsID) {
+		t.Error("non-global host should be blocked without workspace policy")
+	}
+
+	// Set workspace policy
+	checker.SetWorkspacePolicy(wsID, []string{"custom-api.internal.com", "*.corp.net"})
+
+	if !checker.IsAllowedForWorkspace("custom-api.internal.com", wsID) {
+		t.Error("workspace-specific host should be allowed after SetWorkspacePolicy")
+	}
+	if !checker.IsAllowedForWorkspace("svc.corp.net", wsID) {
+		t.Error("workspace wildcard should match")
+	}
+	if !checker.IsAllowedForWorkspace("github.com", wsID) {
+		t.Error("global host should still be allowed")
+	}
+
+	// Other workspaces don't get the policy
+	otherWS := uuid.New()
+	if checker.IsAllowedForWorkspace("custom-api.internal.com", otherWS) {
+		t.Error("workspace policy should not apply to other workspaces")
+	}
+
+	// Remove policy
+	checker.RemoveWorkspacePolicy(wsID)
+	if checker.IsAllowedForWorkspace("custom-api.internal.com", wsID) {
+		t.Error("workspace host should be blocked after RemoveWorkspacePolicy")
+	}
+}
+
+func TestEgressCheckerNilWorkspaceID(t *testing.T) {
+	checker := NewEgressChecker([]string{"github.com"})
+
+	if !checker.IsAllowedForWorkspace("github.com", uuid.Nil) {
+		t.Error("global host should be allowed even with nil workspace ID")
+	}
+	if checker.IsAllowedForWorkspace("evil.com", uuid.Nil) {
+		t.Error("non-global host should be blocked with nil workspace ID")
 	}
 }

@@ -126,7 +126,7 @@ func (r *Reaper) tick(ctx context.Context) {
 
 	now := time.Now().UTC()
 	for _, h := range handles {
-		if h.Labels["cordon.service-for"] != "" {
+		if h.ServiceFor != "" {
 			continue // skip service containers, lifecycle tied to primary
 		}
 

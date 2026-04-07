@@ -69,7 +69,8 @@ type WorkspaceConfig struct {
 	Name             string
 	Mode             WorkspaceMode
 	Repos            []RepoConfig
-	Investigation    *InvestigationState // non-nil for investigation workspaces
+	Investigation    *InvestigationState    // non-nil for investigation workspaces
+	EgressPolicy     *WorkspaceEgressPolicy // nil = use global defaults only
 	DevcontainerPath string
 	CPU              int
 	MemoryMB         int

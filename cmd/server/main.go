@@ -137,6 +137,12 @@ func main() {
 	// handler can attribute MITM traffic to the originating workspace.
 	wsRegistry := workspace.NewMemoryRegistry()
 
+	// Application services
+	auditBroadcast := auditpkg.NewBroadcaster()
+	auditService := auditpkg.NewService(auditStore)
+	swapper := proxy.NewSecretSwapper(vault)
+	egress := proxy.NewEgressChecker(cfg.Egress.Allowlist)
+
 	// Workspace orchestrator (ComputeBackend → Orchestrator)
 	var orchestrator *workspace.Orchestrator
 	dockerBackend, err := docker.NewBackend()
@@ -153,31 +159,27 @@ func main() {
 		egressPolicy := domain.EgressPolicy{
 			Enabled:   cfg.Egress.Enforce,
 			ProxyAddr: cfg.Egress.ProxyAddr,
+			Allowlist: cfg.Egress.Allowlist,
 		}
 		if !cfg.Egress.Enforce {
 			slog.Warn("network-level egress enforcement DISABLED, workspace containers can reach any host", "env", "CORDON_EGRESS_ENFORCE=false")
 		}
 
 		orchestrator = workspace.NewOrchestrator(workspace.OrchestratorConfig{
-			Backend:          dockerBackend,
-			Builder:          builder,
-			Vault:            vault,
-			TenantID:         tenantID,
-			GitHost:          gitHost,
-			Progress:         progressStore,
-			Egress:           egressPolicy,
-			CAPem:            ca.PEM(),
-			Registry:         wsRegistry,
+			Backend:            dockerBackend,
+			Builder:            builder,
+			Vault:              vault,
+			TenantID:           tenantID,
+			GitHost:            gitHost,
+			Progress:           progressStore,
+			Egress:             egressPolicy,
+			CAPem:              ca.PEM(),
+			Registry:           wsRegistry,
+			EgressManager:      egress,
 			DefaultMaxLifetime: cfg.Workspace.DefaultMaxLifetime,
 			CloneConcurrency:   cfg.Workspace.CloneConcurrency,
 		})
 	}
-
-	// Application services
-	auditBroadcast := auditpkg.NewBroadcaster()
-	auditService := auditpkg.NewService(auditStore)
-	swapper := proxy.NewSecretSwapper(vault)
-	egress := proxy.NewEgressChecker(cfg.Egress.Allowlist)
 
 	pipeline := proxy.NewPipeline(proxy.PipelineConfig{
 		SQLClassifier:   proxy.NewSQLClassifier(),

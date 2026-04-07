@@ -58,7 +58,7 @@ func (p *Pipeline) Process(ctx context.Context, req ProxyRequest) ProxyResponse 
 	start := time.Now()
 
 	// Step 1: Egress check (HTTP only — SQL goes through the internal proxy, not external)
-	if p.egress != nil && req.QueryType == QueryTypeHTTP && req.Host != "" && !p.egress.IsAllowed(req.Host) {
+	if p.egress != nil && req.QueryType == QueryTypeHTTP && req.Host != "" && !p.egress.IsAllowedForWorkspace(req.Host, req.WorkspaceID) {
 		entry := p.auditEntry(req, domain.TierDestructive, domain.DecisionBlocked, start)
 		entry.Detail = "egress blocked: " + req.Host
 		p.writeAudit(ctx, entry)

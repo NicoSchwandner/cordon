@@ -60,6 +60,7 @@ Enforced by `archtest/`:
 - **Error responses**: RFC 7807 ProblemDetails (`application/problem+json`), type URLs at `cordon.dev/problems/`.
 - **Auth**: Pluggable via `AuthValidator` interface. Static mode (dev, requires `CORDON_INSECURE=true`), token mode (API keys), JWT mode (production — verifies signed tokens from any OIDC provider via JWKS).
 - **Frontend**: SvelteKit 5 with Svelte 5 runes, Tailwind v4, `@theme` semantic tokens, adapter-static (SPA).
+- **CLI/Web parity**: Every operation available in the web UI must also be available in the CLI, and vice versa. When adding a new feature, implement both interfaces.
 
 ## Security Model
 

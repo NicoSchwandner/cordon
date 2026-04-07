@@ -288,6 +288,7 @@ All state (workspaces, secrets, audit entries, approvals) is scoped by tenant ID
 | Auth           | JWT verification (BYOIDP) | Cordon verifies tokens, never issues them — bring your own IdP |
 | Approval store | PostgreSQL + WebSocket    | Persistent grants survive restarts; real-time via WS           |
 | Frontend       | SvelteKit SPA             | adapter-static, Vite proxy to Go backend                       |
+| CLI/Web parity | Feature parity required   | Every operation must be available in both CLI and web UI       |
 
 ## License
 

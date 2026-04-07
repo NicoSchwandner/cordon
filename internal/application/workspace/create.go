@@ -24,7 +24,7 @@ func (o *Orchestrator) createBare(ctx context.Context, tenantID uuid.UUID, confi
 
 	slog.Info("creating bare container", "component", "workspace", "container", cName, "tenant", tenantID.String()[:8])
 
-	networkName := cName + "-net"
+	networkName := workspaceNetworkName(cName)
 	internalProxyAddr, err := o.createIsolatedNetwork(ctx, networkName, tenantID, wsID)
 	if err != nil {
 		return domain.Workspace{}, err
@@ -55,6 +55,8 @@ func (o *Orchestrator) createBare(ctx context.Context, tenantID uuid.UUID, confi
 		o.backend.RemoveNetwork(ctx, networkName)
 		return domain.Workspace{}, err
 	}
+
+	o.registerEgressPolicy(wsID, config)
 
 	return domain.Workspace{
 		ID:        wsID,
@@ -118,7 +120,7 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 
 	// Create network with egress enforcement
 	emit("creating_container", "Creating container...")
-	networkName := cName + "-net"
+	networkName := workspaceNetworkName(cName)
 	internalProxyAddr, err := o.createIsolatedNetwork(ctx, networkName, tenantID, wsID)
 	if err != nil {
 		return domain.Workspace{}, err
@@ -175,6 +177,8 @@ func (o *Orchestrator) createFromRepos(ctx context.Context, tenantID uuid.UUID, 
 		ExpiresAt: now.Add(config.MaxLifetime),
 		Config:    config,
 	}
+
+	o.registerEgressPolicy(wsID, config)
 
 	cid := handle.ID
 
@@ -264,7 +268,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 	o.backend.PullImage(ctx, image)
 
 	emit("creating_container", "Creating container...")
-	networkName := cName + "-net"
+	networkName := workspaceNetworkName(cName)
 	internalProxyAddr, err := o.createIsolatedNetwork(ctx, networkName, tenantID, wsID)
 	if err != nil {
 		return domain.Workspace{}, err
@@ -303,6 +307,8 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 		o.backend.RemoveNetwork(ctx, networkName)
 		return domain.Workspace{}, err
 	}
+
+	o.registerEgressPolicy(wsID, config)
 
 	cid := handle.ID
 

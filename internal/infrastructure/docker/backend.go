@@ -3,6 +3,7 @@ package docker
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,7 +17,10 @@ import (
 	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/google/uuid"
 	"github.com/NicoSchwandner/cordon/internal/application/ports"
+	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
 // Backend implements ports.ComputeBackend using the Docker Engine API.
@@ -86,12 +90,12 @@ func (b *Backend) CreateContainer(ctx context.Context, opts ports.CreateContaine
 	}
 	slog.Info("container is running", "component", "docker", "name", opts.Name, "container_id", resp.ID[:12])
 
-	return ports.ContainerHandle{
-		ID:     resp.ID,
-		Name:   opts.Name,
-		State:  "running",
-		Labels: opts.Labels,
-	}, nil
+	h := labelsToHandle(opts.Labels)
+	h.ID = resp.ID
+	h.Name = opts.Name
+	h.State = "running"
+	h.NetworkName = opts.Network
+	return h, nil
 }
 
 func (b *Backend) RemoveContainer(ctx context.Context, id string) error {
@@ -149,17 +153,17 @@ func (b *Backend) ExecWithOutput(ctx context.Context, id string, cmd string) (st
 	}
 	defer attach.Close()
 
-	var buf bytes.Buffer
-	_, _ = io.Copy(&buf, attach.Reader)
+	var stdout, stderr bytes.Buffer
+	_, _ = stdcopy.StdCopy(&stdout, &stderr, attach.Reader)
 
 	exitCode, err := b.waitExec(ctx, execResp.ID)
 	if err != nil {
-		return buf.String(), err
+		return stdout.String(), err
 	}
 	if exitCode != 0 {
-		return buf.String(), fmt.Errorf("command exited with code %d", exitCode)
+		return stdout.String(), fmt.Errorf("command exited with code %d", exitCode)
 	}
-	return buf.String(), nil
+	return stdout.String(), nil
 }
 
 // ExecRaw runs a command with a raw argument list (no shell wrapping) and returns output.
@@ -179,14 +183,14 @@ func (b *Backend) ExecRaw(ctx context.Context, id string, cmd []string) (int, st
 	}
 	defer attach.Close()
 
-	var buf bytes.Buffer
-	io.Copy(&buf, attach.Reader)
+	var stdout, stderr bytes.Buffer
+	stdcopy.StdCopy(&stdout, &stderr, attach.Reader)
 
 	exitCode, err := b.waitExec(ctx, execResp.ID)
 	if err != nil {
-		return -1, buf.String(), err
+		return -1, stdout.String(), err
 	}
-	return exitCode, buf.String(), nil
+	return exitCode, stdout.String(), nil
 }
 
 // OpenTerminal creates an interactive PTY session in a container.
@@ -308,13 +312,15 @@ func (b *Backend) ListContainers(ctx context.Context, labels map[string]string) 
 		if len(c.Names) > 0 {
 			name = strings.TrimPrefix(c.Names[0], "/")
 		}
-		handles = append(handles, ports.ContainerHandle{
-			ID:              c.ID,
-			Name:            name,
-			State:           c.State,
-			WorkspaceFolder: c.Labels["cordon.workspace-folder"],
-			Labels:          c.Labels,
-		})
+		h := labelsToHandle(c.Labels)
+		h.ID = c.ID
+		h.Name = name
+		h.State = c.State
+		h.WorkspaceFolder = c.Labels["cordon.workspace-folder"]
+		if name != "" {
+			h.NetworkName = name + "-net"
+		}
+		handles = append(handles, h)
 	}
 	return handles, nil
 }
@@ -330,6 +336,40 @@ func (b *Backend) waitExec(ctx context.Context, execID string) (int, error) {
 			return inspect.ExitCode, nil
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+// labelsToHandle populates a ContainerHandle's typed fields from Docker labels.
+func labelsToHandle(labels map[string]string) ports.ContainerHandle {
+	wsID, _ := uuid.Parse(labels["cordon.workspace"])
+	tenantID, _ := uuid.Parse(labels["cordon.tenant"])
+	created, _ := time.Parse(time.RFC3339, labels["cordon.created"])
+	expires, _ := time.Parse(time.RFC3339, labels["cordon.expires"])
+
+	var repos []domain.RepoConfig
+	if r := labels["cordon.repos"]; r != "" {
+		json.Unmarshal([]byte(r), &repos)
+	}
+
+	var shallowRepos []string
+	if sr := labels["cordon.shallow-repos"]; sr != "" {
+		json.Unmarshal([]byte(sr), &shallowRepos)
+	}
+
+	return ports.ContainerHandle{
+		WorkspaceID:   wsID,
+		TenantID:      tenantID,
+		WorkspaceName: labels["cordon.name"],
+		CreatedAt:     created,
+		ExpiresAt:     expires,
+		Mode:          labels["cordon.mode"],
+		Repos:         repos,
+		ShallowRepos:  shallowRepos,
+		CatalogOrg:    labels["cordon.org"],
+		SpawnedFrom:   labels["cordon.spawned-from"],
+		ServiceFor:    labels["cordon.service-for"],
+		IsGateway:     labels[gatewayLabelKey] == gatewayLabelVal,
+		Labels:        labels,
 	}
 }
 

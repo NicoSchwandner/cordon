@@ -28,7 +28,7 @@ func (o *Orchestrator) findPrimaryContainer(ctx context.Context, tenantID, works
 		return ports.ContainerHandle{}, fmt.Errorf("querying containers: %w", err)
 	}
 	for _, h := range handles {
-		if h.Labels["cordon.service-for"] == "" {
+		if h.ServiceFor == "" {
 			return h, nil
 		}
 	}
@@ -232,6 +232,24 @@ func redactToken(output, token string) string {
 	return strings.ReplaceAll(output, token, "***")
 }
 
+// registerEgressPolicy registers per-workspace egress rules if the workspace
+// config includes an egress policy with additional allowed hosts.
+func (o *Orchestrator) registerEgressPolicy(wsID uuid.UUID, config domain.WorkspaceConfig) {
+	if o.egressManager == nil || config.EgressPolicy == nil || len(config.EgressPolicy.AdditionalHosts) == 0 {
+		return
+	}
+	o.egressManager.SetWorkspacePolicy(wsID, config.EgressPolicy.AdditionalHosts)
+	slog.Info("registered per-workspace egress policy", "component", "workspace", "workspace", wsID.String()[:8], "additional_hosts", len(config.EgressPolicy.AdditionalHosts))
+}
+
+// removeEgressPolicy removes per-workspace egress rules on workspace destruction.
+func (o *Orchestrator) removeEgressPolicy(wsID uuid.UUID) {
+	if o.egressManager == nil {
+		return
+	}
+	o.egressManager.RemoveWorkspacePolicy(wsID)
+}
+
 func (o *Orchestrator) emitter(wsID uuid.UUID) func(step, msg string) {
 	return func(step, msg string) {
 		if o.progress != nil {
@@ -283,64 +301,57 @@ EOF`, wsID.String(), tenantID.String())
 	slog.Info("routing layer installed", "component", "workspace", "tool_wrappers", len(tools))
 }
 
-// handleToWorkspace converts a ContainerHandle (with labels) to a domain.Workspace.
+// handleToWorkspace converts a ContainerHandle to a domain.Workspace using typed fields.
 func handleToWorkspace(h ports.ContainerHandle) domain.Workspace {
-	wsID, _ := uuid.Parse(h.Labels["cordon.workspace"])
-	tenantID, _ := uuid.Parse(h.Labels["cordon.tenant"])
-	created, _ := time.Parse(time.RFC3339, h.Labels["cordon.created"])
-	expires, _ := time.Parse(time.RFC3339, h.Labels["cordon.expires"])
-
+	created := h.CreatedAt
 	if created.IsZero() {
 		created = time.Now().UTC()
 	}
+	expires := h.ExpiresAt
 	if expires.IsZero() {
-		expires = created.Add(8 * time.Hour) // fallback for containers with missing label
+		expires = created.Add(8 * time.Hour) // fallback for containers with missing metadata
 	}
 
-	status := domain.WorkspaceRunning
-	switch h.State {
-	case "paused":
-		status = domain.WorkspaceSuspended
-	case "exited", "dead", "removing":
-		status = domain.WorkspaceDestroyed
-	case "created", "restarting":
-		status = domain.WorkspaceCreating
-	}
+	status := mapContainerState(h.State)
 
-	var repos []domain.RepoConfig
-	if reposJSON := h.Labels["cordon.repos"]; reposJSON != "" {
-		json.Unmarshal([]byte(reposJSON), &repos)
-	}
+	config := domain.WorkspaceConfig{Repos: h.Repos}
 
-	config := domain.WorkspaceConfig{Repos: repos}
-
-	if mode := h.Labels["cordon.mode"]; mode == string(domain.WorkspaceModeInvestigation) {
+	if h.Mode == string(domain.WorkspaceModeInvestigation) {
 		config.Mode = domain.WorkspaceModeInvestigation
-		var shallowRepos []string
-		if sr := h.Labels["cordon.shallow-repos"]; sr != "" {
-			json.Unmarshal([]byte(sr), &shallowRepos)
-		}
 		config.Investigation = &domain.InvestigationState{
-			CatalogOrg:   h.Labels["cordon.org"],
-			ShallowRepos: shallowRepos,
+			CatalogOrg:   h.CatalogOrg,
+			ShallowRepos: h.ShallowRepos,
 		}
 	}
 
 	ws := domain.Workspace{
-		ID:        wsID,
-		TenantID:  tenantID,
-		Name:      h.Labels["cordon.name"],
+		ID:        h.WorkspaceID,
+		TenantID:  h.TenantID,
+		Name:      h.WorkspaceName,
 		Status:    status,
 		CreatedAt: created,
 		ExpiresAt: expires,
 		Config:    config,
 	}
-	if sf := h.Labels["cordon.spawned-from"]; sf != "" {
-		if id, err := uuid.Parse(sf); err == nil {
+	if h.SpawnedFrom != "" {
+		if id, err := uuid.Parse(h.SpawnedFrom); err == nil {
 			ws.SpawnedFrom = &id
 		}
 	}
 	return ws
+}
+
+func mapContainerState(state string) domain.WorkspaceStatus {
+	switch state {
+	case "paused":
+		return domain.WorkspaceSuspended
+	case "exited", "dead", "removing":
+		return domain.WorkspaceDestroyed
+	case "created", "restarting":
+		return domain.WorkspaceCreating
+	default:
+		return domain.WorkspaceRunning
+	}
 }
 
 // workspaceCapDrop returns the Linux capabilities to drop for workspace containers.
@@ -360,6 +371,12 @@ func containerName(name string, wsID uuid.UUID) string {
 	return fmt.Sprintf("cordon-%s-%s", sanitizeName(name), wsID.String()[:8])
 }
 
+// workspaceNetworkName returns the network name for a workspace container.
+// Centralizes the naming convention so it lives in one place.
+func workspaceNetworkName(containerName string) string {
+	return containerName + "-net"
+}
+
 func baseLabels(tenantID, wsID uuid.UUID, name string, now time.Time, maxLifetime time.Duration) map[string]string {
 	return map[string]string{
 		"cordon.tenant":    tenantID.String(),
@@ -372,8 +389,8 @@ func baseLabels(tenantID, wsID uuid.UUID, name string, now time.Time, maxLifetim
 
 var ipv4Re = regexp.MustCompile(`\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b`)
 
-// extractIPv4 finds the first IPv4 address in a string, ignoring any
-// binary noise (e.g. Docker multiplexed stream headers).
+// extractIPv4 finds the first IPv4 address in a string. Used to parse
+// multi-IP output from `hostname -I`.
 func extractIPv4(s string) string {
 	return ipv4Re.FindString(s)
 }

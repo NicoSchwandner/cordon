@@ -61,8 +61,20 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	host := r.Host
 	hostname := stripPort(host)
 
-	if !h.egress.IsAllowed(host) {
-		slog.Warn("egress denied", "component", "connect", "host", host)
+	// Resolve workspace ID from the real client IP (reported via PROXY protocol
+	// by the gateway's haproxy, parsed by the proxyproto listener wrapper).
+	// This must happen before the egress check so per-workspace policies apply.
+	remoteIP := stripPort(r.RemoteAddr)
+	wsID := uuid.Nil
+	if h.registry != nil {
+		wsID = h.registry.Lookup(remoteIP)
+		if wsID == uuid.Nil {
+			slog.Warn("no workspace found for remote IP", "component", "connect", "remote_ip", remoteIP, "raw_addr", r.RemoteAddr)
+		}
+	}
+
+	if !h.egress.IsAllowedForWorkspace(host, wsID) {
+		slog.Warn("egress denied", "component", "connect", "host", host, "workspace", wsID)
 		http.Error(w, "egress denied: "+host+" not in allowlist", http.StatusForbidden)
 		return
 	}
@@ -77,17 +89,6 @@ func (h *ConnectHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		slog.Error("hijack failed", "component", "connect", "error", err)
 		return
-	}
-
-	// Resolve workspace ID from the real client IP (reported via PROXY protocol
-	// by the gateway's haproxy, parsed by the proxyproto listener wrapper).
-	remoteIP := stripPort(r.RemoteAddr)
-	wsID := uuid.Nil
-	if h.registry != nil {
-		wsID = h.registry.Lookup(remoteIP)
-		if wsID == uuid.Nil {
-			slog.Warn("no workspace found for remote IP", "component", "connect", "remote_ip", remoteIP, "raw_addr", r.RemoteAddr)
-		}
 	}
 
 	clientConn.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
