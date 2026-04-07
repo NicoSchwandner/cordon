@@ -11,4 +11,4 @@ CREATE TABLE IF NOT EXISTS approval_grants (
     consumed     BOOLEAN NOT NULL DEFAULT FALSE
 );
 
-CREATE INDEX idx_approval_grants_lookup ON approval_grants (tenant_id, workspace_id, operation, target) WHERE NOT consumed AND expires_at > NOW();
+CREATE INDEX idx_approval_grants_lookup ON approval_grants (tenant_id, workspace_id, operation, target) WHERE NOT consumed;
