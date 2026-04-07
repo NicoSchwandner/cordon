@@ -294,7 +294,7 @@ func handleToWorkspace(h ports.ContainerHandle) domain.Workspace {
 		created = time.Now().UTC()
 	}
 	if expires.IsZero() {
-		expires = created.Add(8 * time.Hour)
+		expires = created.Add(8 * time.Hour) // fallback for containers with missing label
 	}
 
 	status := domain.WorkspaceRunning

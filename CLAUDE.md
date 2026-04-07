@@ -122,12 +122,26 @@ These are pragmatic shortcuts taken for the MVP that should be addressed for pro
 
 ## Environment Variables
 
-| Variable                | Default                               | Description                                                |
-| ----------------------- | ------------------------------------- | ---------------------------------------------------------- |
-| `PORT`                  | `8443`                                | Server listen port                                         |
-| `DATABASE_URL`          | `postgres://...localhost:5432/cordon` | PostgreSQL connection                                      |
-| `AUTH_MODE`             | `static`                              | `static` or `token`                                        |
-| `DEFAULT_TENANT_ID`     | `00000000-...0001`                    | Tenant ID for static auth                                  |
-| `CORDON_SERVER`         | `http://localhost:8443`               | CLI/E2E server URL                                         |
-| `CORDON_PROXY_ADDR`     | `host.docker.internal:{PORT}`         | Address workspaces use to reach the proxy                  |
-| `CORDON_EGRESS_ENFORCE` | _(enabled by default)_                | Set to `false` to disable network-level egress enforcement |
+All server configuration is centralized in `internal/infrastructure/config/server_config.go` and loaded via `config.LoadServer()`.
+
+| Variable                    | Default                               | Description                                                |
+| --------------------------- | ------------------------------------- | ---------------------------------------------------------- |
+| `PORT`                      | `8443`                                | Server listen port                                         |
+| `DATABASE_URL`              | `postgres://...localhost:5432/cordon` | PostgreSQL connection                                      |
+| `AUTH_MODE`                 | `static`                              | `static` or `token`                                        |
+| `DEFAULT_TENANT_ID`         | `00000000-...0001`                    | Tenant ID for static auth                                  |
+| `CORDON_SERVER`             | `http://localhost:8443`               | CLI/E2E server URL                                         |
+| `CORDON_PROXY_ADDR`         | `host.docker.internal:{PORT}`         | Address workspaces use to reach the proxy                  |
+| `CORDON_EGRESS_ENFORCE`     | _(enabled by default)_                | Set to `false` to disable network-level egress enforcement |
+| `CORDON_EGRESS_ALLOWLIST`   | github,anthropic,npm,nuget            | Comma-separated egress host allowlist                      |
+| `CORDON_IDLE_TIMEOUT`       | `15m`                                 | Default workspace idle timeout                             |
+| `CORDON_MAX_LIFETIME`       | `8h`                                  | Default workspace max lifetime                             |
+| `CORDON_MAX_EXTENSION`      | `24h`                                 | Hard ceiling for TTL extensions                            |
+| `CORDON_ASYNC_TIMEOUT`      | `30m`                                 | Timeout for async workspace creation                       |
+| `CORDON_APPROVAL_TIMEOUT`   | `5m`                                  | Timeout for T3 approval gates                              |
+| `CORDON_CLONE_CONCURRENCY`  | `12`                                  | Parallel repo clone semaphore size                         |
+| `CORDON_PROXY_HTTP_TIMEOUT` | `30s`                                 | Timeout for outbound HTTP proxy requests                   |
+| `CORDON_MAX_RESPONSE_BODY`  | `1048576`                             | Max response body size (bytes)                             |
+| `CORDON_REAPER_INTERVAL`    | `30s`                                 | How often the reaper checks for expired workspaces         |
+| `CORDON_GITHUB_REPO_TTL`    | `5m`                                  | Cache TTL for GitHub repo lists                            |
+| `CORDON_GITHUB_BRANCH_TTL`  | `2m`                                  | Cache TTL for GitHub branch lists                          |

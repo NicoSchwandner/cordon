@@ -33,6 +33,17 @@ type WorkspacePreparer interface {
 	InsertPending(ctx context.Context, ws domain.Workspace) error
 }
 
+// WorkspaceHandlerConfig holds configurable defaults for workspace operations.
+type WorkspaceHandlerConfig struct {
+	DefaultMaxLifetime time.Duration
+	MaxExtension       time.Duration
+	MinLifetime        time.Duration
+	DefaultIdleTimeout time.Duration
+	DefaultCPU         int
+	DefaultMemoryMB    int
+	AsyncTimeout       time.Duration
+}
+
 type WorkspaceHandler struct {
 	service  ports.WorkspaceService
 	progress *progress.Store
@@ -40,10 +51,11 @@ type WorkspaceHandler struct {
 	ttl      WorkspaceTTLExtender      // optional, nil-safe
 	preparer WorkspacePreparer         // optional, nil-safe
 	agents   *ws.AgentRegistry         // optional, nil-safe
+	cfg      WorkspaceHandlerConfig
 }
 
-func NewWorkspaceHandler(service ports.WorkspaceService, ps *progress.Store, ar WorkspaceActivityRecorder, ttl WorkspaceTTLExtender, agents *ws.AgentRegistry) *WorkspaceHandler {
-	h := &WorkspaceHandler{service: service, progress: ps, activity: ar, ttl: ttl, agents: agents}
+func NewWorkspaceHandler(service ports.WorkspaceService, ps *progress.Store, ar WorkspaceActivityRecorder, ttl WorkspaceTTLExtender, agents *ws.AgentRegistry, cfg WorkspaceHandlerConfig) *WorkspaceHandler {
+	h := &WorkspaceHandler{service: service, progress: ps, activity: ar, ttl: ttl, agents: agents, cfg: cfg}
 	// If the service implements WorkspacePreparer (e.g., PersistentService), use it.
 	if p, ok := service.(WorkspacePreparer); ok {
 		h.preparer = p
@@ -170,11 +182,11 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	maxLifetime := 8 * time.Hour
+	maxLifetime := h.cfg.DefaultMaxLifetime
 	if req.MaxLifetime != "" {
 		parsed, err := time.ParseDuration(req.MaxLifetime)
-		if err != nil || parsed < time.Minute || parsed > 24*time.Hour {
-			http.Error(w, "invalid max_lifetime (must be between 1m and 24h)", http.StatusBadRequest)
+		if err != nil || parsed < h.cfg.MinLifetime || parsed > h.cfg.MaxExtension {
+			http.Error(w, fmt.Sprintf("invalid max_lifetime (must be between %s and %s)", h.cfg.MinLifetime, h.cfg.MaxExtension), http.StatusBadRequest)
 			return
 		}
 		maxLifetime = parsed
@@ -184,9 +196,9 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		Name:             name,
 		Repos:            repos,
 		DevcontainerPath: req.DevcontainerPath,
-		CPU:              max(req.CPU, 1),
-		MemoryMB:         max(req.MemoryMB, 512),
-		IdleTimeout:      15 * time.Minute,
+		CPU:              max(req.CPU, h.cfg.DefaultCPU),
+		MemoryMB:         max(req.MemoryMB, h.cfg.DefaultMemoryMB),
+		IdleTimeout:      h.cfg.DefaultIdleTimeout,
 		MaxLifetime:      maxLifetime,
 	}
 
@@ -226,7 +238,7 @@ func (h *WorkspaceHandler) Create(w http.ResponseWriter, r *http.Request) {
 		h.progress.Create(wsID)
 
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			ctx, cancel := context.WithTimeout(context.Background(), h.cfg.AsyncTimeout)
 			defer cancel()
 
 			ws, err := h.service.Create(ctx, tenantID, config)
@@ -640,8 +652,8 @@ func (h *WorkspaceHandler) Extend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	duration, err := time.ParseDuration(req.Duration)
-	if err != nil || duration <= 0 || duration > 24*time.Hour {
-		http.Error(w, "invalid duration (must be between 1m and 24h)", http.StatusBadRequest)
+	if err != nil || duration <= 0 || duration > h.cfg.MaxExtension {
+		http.Error(w, fmt.Sprintf("invalid duration (must be between 1m and %s)", h.cfg.MaxExtension), http.StatusBadRequest)
 		return
 	}
 
@@ -661,8 +673,7 @@ func (h *WorkspaceHandler) Extend(w http.ResponseWriter, r *http.Request) {
 	}
 	newExpiry := base.Add(duration)
 
-	// Hard ceiling: can't extend more than 24h from now
-	maxExpiry := now.Add(24 * time.Hour)
+	maxExpiry := now.Add(h.cfg.MaxExtension)
 	if newExpiry.After(maxExpiry) {
 		newExpiry = maxExpiry
 	}

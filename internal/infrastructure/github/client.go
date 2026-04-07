@@ -12,8 +12,10 @@ import (
 
 // Client provides cached access to the GitHub API.
 type Client struct {
-	token string
-	http  *http.Client
+	token         string
+	http          *http.Client
+	repoListTTL   time.Duration
+	branchListTTL time.Duration
 
 	// Caches
 	defaultBranches sync.Map // "owner/repo" → string
@@ -58,16 +60,20 @@ type GitIdentity struct {
 	Email string
 }
 
-const (
-	repoListTTL   = 5 * time.Minute
-	branchListTTL = 2 * time.Minute
-)
+// ClientConfig holds configurable values for the GitHub API client.
+type ClientConfig struct {
+	RepoListTTL   time.Duration
+	BranchListTTL time.Duration
+	HTTPTimeout   time.Duration
+}
 
 // NewClient creates a GitHub API client. Token may be empty (public repos only).
-func NewClient(token string) *Client {
+func NewClient(token string, cfg ClientConfig) *Client {
 	return &Client{
-		token: token,
-		http:  &http.Client{Timeout: 15 * time.Second},
+		token:         token,
+		repoListTTL:   cfg.RepoListTTL,
+		branchListTTL: cfg.BranchListTTL,
+		http:          &http.Client{Timeout: cfg.HTTPTimeout},
 	}
 }
 
@@ -175,7 +181,7 @@ func (c *Client) ListUserOrgs() ([]UserOrg, error) {
 func (c *Client) ListOrgRepos(org string) ([]OrgRepo, error) {
 	if cached, ok := c.orgRepos.Load(org); ok {
 		entry := cached.(*cachedRepoList)
-		if time.Since(entry.fetchedAt) < repoListTTL {
+		if time.Since(entry.fetchedAt) < c.repoListTTL {
 			return entry.repos, nil
 		}
 	}
@@ -203,7 +209,7 @@ func (c *Client) ListBranches(owner, repo string) ([]Branch, error) {
 
 	if cached, ok := c.repoBranches.Load(key); ok {
 		entry := cached.(*cachedBranchList)
-		if time.Since(entry.fetchedAt) < branchListTTL {
+		if time.Since(entry.fetchedAt) < c.branchListTTL {
 			return entry.branches, nil
 		}
 	}

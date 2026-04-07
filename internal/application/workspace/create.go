@@ -309,8 +309,7 @@ func (o *Orchestrator) createInvestigation(ctx context.Context, tenantID uuid.UU
 	o.backend.Exec(ctx, cid, "mkdir -p /workspace/.cordon")
 
 	// Parallel shallow clone with semaphore
-	const concurrency = 12
-	sem := make(chan struct{}, concurrency)
+	sem := make(chan struct{}, o.cloneConcurrency)
 	var wg sync.WaitGroup
 	var completed atomic.Int32
 	total := len(repoURLs)

@@ -88,7 +88,7 @@ func TestListBranches(t *testing.T) {
 	defer srv.Close()
 
 	// Verify the test server works (integration test pattern)
-	client := NewClient("test-token")
+	client := NewClient("test-token", ClientConfig{RepoListTTL: 5 * time.Minute, BranchListTTL: 2 * time.Minute, HTTPTimeout: 15 * time.Second})
 	client.http = srv.Client()
 
 	// We can't easily test the real GitHub API without URL override,
@@ -111,7 +111,7 @@ func TestListBranches(t *testing.T) {
 }
 
 func TestResolveDefaultBranchFallback(t *testing.T) {
-	client := NewClient("") // no token
+	client := NewClient("", ClientConfig{RepoListTTL: 5 * time.Minute, BranchListTTL: 2 * time.Minute, HTTPTimeout: 15 * time.Second}) // no token
 	branch := client.ResolveDefaultBranch("github.com/org/repo")
 	if branch != "main" {
 		t.Errorf("ResolveDefaultBranch() without token = %q, want %q", branch, "main")
@@ -119,7 +119,7 @@ func TestResolveDefaultBranchFallback(t *testing.T) {
 }
 
 func TestResolveDefaultBranchNonGitHub(t *testing.T) {
-	client := NewClient("test-token")
+	client := NewClient("test-token", ClientConfig{RepoListTTL: 5 * time.Minute, BranchListTTL: 2 * time.Minute, HTTPTimeout: 15 * time.Second})
 	branch := client.ResolveDefaultBranch("gitlab.com/org/repo")
 	if branch != "main" {
 		t.Errorf("ResolveDefaultBranch() for non-GitHub = %q, want %q", branch, "main")

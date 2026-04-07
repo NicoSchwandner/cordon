@@ -39,7 +39,10 @@ func newTestServer() (*ProxyHandler, *middleware.StaticAuth) {
 	})
 
 	auth := &middleware.StaticAuth{TenantID: tenantID, UserID: "test-user"}
-	return NewProxyHandler(pipeline), auth
+	return NewProxyHandler(pipeline, ProxyHandlerConfig{
+		HTTPTimeout:     30 * time.Second,
+		MaxResponseBody: 1 << 20,
+	}), auth
 }
 
 func TestSQLProxyTier1(t *testing.T) {

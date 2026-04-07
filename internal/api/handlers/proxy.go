@@ -9,25 +9,34 @@ import (
 	"time"
 
 	"github.com/NicoSchwandner/cordon/internal/api/middleware"
+
 	"github.com/NicoSchwandner/cordon/internal/application/proxy"
 	"github.com/NicoSchwandner/cordon/internal/domain"
 )
 
-// ProxyHandler handles SQL and HTTP proxy requests.
-type ProxyHandler struct {
-	pipeline *proxy.Pipeline
-	client   *http.Client
+// ProxyHandlerConfig holds configurable values for the proxy handler.
+type ProxyHandlerConfig struct {
+	HTTPTimeout     time.Duration
+	MaxResponseBody int64
 }
 
-func NewProxyHandler(pipeline *proxy.Pipeline) *ProxyHandler {
+// ProxyHandler handles SQL and HTTP proxy requests.
+type ProxyHandler struct {
+	pipeline        *proxy.Pipeline
+	client          *http.Client
+	maxResponseBody int64
+}
+
+func NewProxyHandler(pipeline *proxy.Pipeline, cfg ProxyHandlerConfig) *ProxyHandler {
 	return &ProxyHandler{
 		pipeline: pipeline,
 		client: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: cfg.HTTPTimeout,
 			CheckRedirect: func(*http.Request, []*http.Request) error {
 				return http.ErrUseLastResponse // don't follow redirects
 			},
 		},
+		maxResponseBody: cfg.MaxResponseBody,
 	}
 }
 
@@ -197,9 +206,7 @@ func (h *ProxyHandler) executeUpstream(ctx context.Context, modified *proxy.Prox
 	}
 	defer resp.Body.Close()
 
-	// Cap response body at 1MB to prevent memory issues
-	const maxBody = 1 << 20
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, h.maxResponseBody))
 	if err != nil {
 		return nil, err
 	}

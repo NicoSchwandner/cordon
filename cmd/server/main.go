@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -22,26 +21,27 @@ import (
 	"github.com/NicoSchwandner/cordon/internal/application/proxy"
 	"github.com/NicoSchwandner/cordon/internal/application/workspace"
 	"github.com/NicoSchwandner/cordon/internal/domain"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/config"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/devcontainer"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/docker"
-	"github.com/NicoSchwandner/cordon/internal/infrastructure/proxyproto"
 	gh "github.com/NicoSchwandner/cordon/internal/infrastructure/github"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/postgres"
+	"github.com/NicoSchwandner/cordon/internal/infrastructure/proxyproto"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/sops"
 	"github.com/NicoSchwandner/cordon/internal/infrastructure/tlsca"
 	ws "github.com/NicoSchwandner/cordon/internal/infrastructure/websocket"
 )
 
 func main() {
-	port := envOr("PORT", "8443")
-	dbURL := envOr("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/cordon?sslmode=disable")
-	authMode := envOr("AUTH_MODE", "static")
-	defaultTenant := envOr("DEFAULT_TENANT_ID", "00000000-0000-0000-0000-000000000001")
+	cfg, err := config.LoadServer()
+	if err != nil {
+		log.Fatalf("loading config: %v", err)
+	}
 
 	ctx := context.Background()
 
 	// Database
-	pool, err := pgxpool.New(ctx, dbURL)
+	pool, err := pgxpool.New(ctx, cfg.Database.URL)
 	if err != nil {
 		log.Fatalf("connecting to database: %v", err)
 	}
@@ -56,9 +56,9 @@ func main() {
 	approvalStore := ws.NewApprovalStore()
 	vault := sops.NewMemoryVault()
 
-	tenantID := uuid.MustParse(defaultTenant)
-	vault.AddSecret(tenantID, "DATABASE_URL", "cordon-placeholder-database-url", envOr("REAL_DATABASE_URL", "postgresql://real:secret@db:5432/prod"))
-	vault.AddSecret(tenantID, "API_KEY", "cordon-placeholder-api-key", envOr("REAL_API_KEY", "sk-real-key-12345"))
+	tenantID := uuid.MustParse(cfg.Auth.DefaultTenantID)
+	vault.AddSecret(tenantID, "DATABASE_URL", "cordon-placeholder-database-url", cfg.Secrets.RealDatabaseURL)
+	vault.AddSecret(tenantID, "API_KEY", "cordon-placeholder-api-key", cfg.Secrets.RealAPIKey)
 
 	// Devcontainer builder (optional — needs `devcontainer` CLI on PATH)
 	var dcBuilder *devcontainer.Builder
@@ -67,15 +67,19 @@ func main() {
 		log.Printf("WARNING: devcontainer CLI not available, repo-based workspaces disabled: %v", err)
 	}
 
-	// GitHub token — read from env var for backward compatibility, register as secret.
+	// GitHub token — read from config, register as secret.
 	// Users can also register/update via POST /api/secrets at runtime.
-	if githubToken := os.Getenv("GITHUB_TOKEN"); githubToken != "" {
+	if cfg.Secrets.GitHubToken != "" {
 		log.Printf("GITHUB_TOKEN configured — private repo cloning enabled")
-		vault.AddSecret(tenantID, "GITHUB_TOKEN", "PLACEHOLDER_GITHUB_TOKEN", githubToken)
+		vault.AddSecret(tenantID, "GITHUB_TOKEN", "PLACEHOLDER_GITHUB_TOKEN", cfg.Secrets.GitHubToken)
 	}
 
 	// GitHub API client (shared across provider + handlers)
-	ghClient := gh.NewClient(os.Getenv("GITHUB_TOKEN"))
+	ghClient := gh.NewClient(cfg.Secrets.GitHubToken, gh.ClientConfig{
+		RepoListTTL:   cfg.GitHub.RepoListTTL,
+		BranchListTTL: cfg.GitHub.BranchListTTL,
+		HTTPTimeout:   cfg.GitHub.HTTPTimeout,
+	})
 
 	// Progress tracking
 	timingStore := progress.NewTimingStore("data/build-timings.json")
@@ -106,29 +110,26 @@ func main() {
 		}
 		gitHost := gh.NewGitHostAdapter(ghClient)
 
-		// Egress enforcement: workspace containers are placed on internal Docker
-		// networks that can only reach the Cordon proxy. This is always on unless
-		// explicitly disabled — running without it means any process inside a
-		// workspace can bypass the proxy and reach the internet directly.
-		egressDisabled := os.Getenv("CORDON_EGRESS_ENFORCE") == "false"
 		egressPolicy := domain.EgressPolicy{
-			Enabled:   !egressDisabled,
-			ProxyAddr: envOr("CORDON_PROXY_ADDR", "host.docker.internal:"+port),
+			Enabled:   cfg.Egress.Enforce,
+			ProxyAddr: cfg.Egress.ProxyAddr,
 		}
-		if egressDisabled {
+		if !cfg.Egress.Enforce {
 			log.Println("WARNING: Network-level egress enforcement DISABLED (CORDON_EGRESS_ENFORCE=false). Workspace containers can reach any host.")
 		}
 
 		orchestrator = workspace.NewOrchestrator(workspace.OrchestratorConfig{
-			Backend:  dockerBackend,
-			Builder:  builder,
-			Vault:    vault,
-			TenantID: tenantID,
-			GitHost:  gitHost,
-			Progress: progressStore,
-			Egress:   egressPolicy,
-			CAPem:    ca.PEM(),
-			Registry: wsRegistry,
+			Backend:          dockerBackend,
+			Builder:          builder,
+			Vault:            vault,
+			TenantID:         tenantID,
+			GitHost:          gitHost,
+			Progress:         progressStore,
+			Egress:           egressPolicy,
+			CAPem:            ca.PEM(),
+			Registry:         wsRegistry,
+			DefaultMaxLifetime: cfg.Workspace.DefaultMaxLifetime,
+			CloneConcurrency:   cfg.Workspace.CloneConcurrency,
 		})
 	}
 
@@ -136,12 +137,7 @@ func main() {
 	auditBroadcast := auditpkg.NewBroadcaster()
 	auditService := auditpkg.NewService(auditStore)
 	swapper := proxy.NewSecretSwapper(vault)
-	egress := proxy.NewEgressChecker([]string{
-		"github.com", "*.github.com",
-		"api.anthropic.com",
-		"registry.npmjs.org",
-		"nuget.org", "*.nuget.org",
-	})
+	egress := proxy.NewEgressChecker(cfg.Egress.Allowlist)
 
 	pipeline := proxy.NewPipeline(proxy.PipelineConfig{
 		SQLClassifier:   proxy.NewSQLClassifier(),
@@ -150,17 +146,17 @@ func main() {
 		Audit:           auditStore,
 		Approver:        approvalStore,
 		Egress:          egress,
-		ApprovalTimeout: 5 * time.Minute,
+		ApprovalTimeout: cfg.Proxy.ApprovalTimeout,
 		Broadcast:       auditBroadcast,
 	})
 
 	// Auth
 	var authValidator middleware.AuthValidator
-	switch authMode {
+	switch cfg.Auth.Mode {
 	case "token":
 		authValidator = &middleware.TokenAuth{
 			Tokens: map[string]middleware.TokenInfo{
-				envOr("API_TOKEN", "dev-token"): {TenantID: tenantID, UserID: "developer"},
+				cfg.Auth.APIToken: {TenantID: tenantID, UserID: "developer"},
 			},
 		}
 	default:
@@ -175,13 +171,13 @@ func main() {
 	var wsService ports.WorkspaceService
 	var reaperCancel context.CancelFunc
 	if orchestrator != nil {
-		lifecycleMgr = workspace.NewLifecycleManager(15 * time.Minute)
+		lifecycleMgr = workspace.NewLifecycleManager(cfg.Workspace.DefaultIdleTimeout)
 
 		// Wrap orchestrator with persistent service so all operations update the DB.
 		persistent := workspace.NewPersistentService(workspaceStore, orchestrator)
 		wsService = persistent
 
-		reaper := workspace.NewReaper(dockerBackend, persistent, lifecycleMgr, 30*time.Second)
+		reaper := workspace.NewReaper(dockerBackend, persistent, lifecycleMgr, cfg.Workspace.ReaperInterval)
 		var reaperCtx context.Context
 		reaperCtx, reaperCancel = context.WithCancel(context.Background())
 		go reaper.Start(reaperCtx)
@@ -190,10 +186,21 @@ func main() {
 	// Handlers
 	agentRegistry := apiws.NewAgentRegistry()
 	healthHandler := handlers.NewHealthHandler(pool)
-	proxyHandler := handlers.NewProxyHandler(pipeline)
+	proxyHandler := handlers.NewProxyHandler(pipeline, handlers.ProxyHandlerConfig{
+		HTTPTimeout:     cfg.Proxy.HTTPTimeout,
+		MaxResponseBody: cfg.Proxy.MaxResponseBody,
+	})
 	auditHandler := handlers.NewAuditHandler(auditService)
 	approvalHandler := handlers.NewApprovalHandler(approvalStore)
-	workspaceHandler := handlers.NewWorkspaceHandler(wsService, progressStore, lifecycleMgr, lifecycleMgr, agentRegistry)
+	workspaceHandler := handlers.NewWorkspaceHandler(wsService, progressStore, lifecycleMgr, lifecycleMgr, agentRegistry, handlers.WorkspaceHandlerConfig{
+		DefaultMaxLifetime: cfg.Workspace.DefaultMaxLifetime,
+		MaxExtension:       cfg.Workspace.MaxExtension,
+		MinLifetime:        cfg.Workspace.MinLifetime,
+		DefaultIdleTimeout: cfg.Workspace.DefaultIdleTimeout,
+		DefaultCPU:         cfg.Workspace.DefaultCPU,
+		DefaultMemoryMB:    cfg.Workspace.DefaultMemoryMB,
+		AsyncTimeout:       cfg.Workspace.AsyncTimeout,
+	})
 	secretHandler := handlers.NewSecretHandler(vault)
 
 	githubHandler := handlers.NewGitHubHandler(ghClient)
@@ -263,11 +270,11 @@ func main() {
 	})
 
 	server := &http.Server{
-		Addr:         ":" + port,
+		Addr:         ":" + cfg.Server.Port,
 		Handler:      handler,
-		ReadTimeout:  30 * time.Second,
+		ReadTimeout:  cfg.HTTP.ReadTimeout,
 		WriteTimeout: 0, // Disable for WebSocket
-		IdleTimeout:  120 * time.Second,
+		IdleTimeout:  cfg.HTTP.IdleTimeout,
 	}
 
 	go func() {
@@ -278,7 +285,7 @@ func main() {
 		if reaperCancel != nil {
 			reaperCancel()
 		}
-		shutCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutCtx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout)
 		defer cancel()
 		server.Shutdown(shutCtx)
 	}()
@@ -286,21 +293,14 @@ func main() {
 	// Listen with PROXY protocol v1 support. Gateway containers use haproxy
 	// with send-proxy to report the real workspace container IP. Direct browser
 	// connections (no PROXY header) pass through unchanged.
-	ln, err := net.Listen("tcp", ":"+port)
+	ln, err := net.Listen("tcp", ":"+cfg.Server.Port)
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
 	ppListener := proxyproto.NewListener(ln)
 
-	log.Printf("Cordon server starting on :%s (auth=%s, workspaces=%v)", port, authMode, orchestrator != nil)
+	log.Printf("Cordon server starting on :%s (auth=%s, workspaces=%v)", cfg.Server.Port, cfg.Auth.Mode, orchestrator != nil)
 	if err := server.Serve(ppListener); err != nil && err != http.ErrServerClosed {
 		log.Fatalf("server error: %v", err)
 	}
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

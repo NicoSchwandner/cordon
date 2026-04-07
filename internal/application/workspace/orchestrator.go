@@ -17,16 +17,18 @@ import (
 // Orchestrator implements ports.WorkspaceService by composing a ComputeBackend
 // with devcontainer building, GitHub operations, and progress reporting.
 type Orchestrator struct {
-	backend  ports.ComputeBackend
-	builder  ports.ImageBuilder      // nil = bare containers only
-	vault    ports.SecretVault       // secret vault for placeholder lookup
-	tenantID uuid.UUID               // tenant for vault lookups
-	gitUser  *ports.GitIdentity      // resolved from git host API at startup
-	gitHost  ports.GitHostClient     // git hosting platform client (nil-safe)
-	progress *progress.Store         // optional progress event emitter
-	egress   domain.EgressPolicy     // network-level egress enforcement
-	caPem    []byte                  // MITM CA cert PEM for container trust store injection
-	registry ports.WorkspaceRegistry // maps gateway IPs to workspace IDs
+	backend          ports.ComputeBackend
+	builder          ports.ImageBuilder      // nil = bare containers only
+	vault            ports.SecretVault       // secret vault for placeholder lookup
+	tenantID         uuid.UUID               // tenant for vault lookups
+	gitUser          *ports.GitIdentity      // resolved from git host API at startup
+	gitHost          ports.GitHostClient     // git hosting platform client (nil-safe)
+	progress         *progress.Store         // optional progress event emitter
+	egress           domain.EgressPolicy     // network-level egress enforcement
+	caPem            []byte                  // MITM CA cert PEM for container trust store injection
+	registry         ports.WorkspaceRegistry // maps gateway IPs to workspace IDs
+	defaultMaxLifetime time.Duration
+	cloneConcurrency   int
 }
 
 // Compile-time check that Orchestrator satisfies WorkspaceService.
@@ -34,29 +36,41 @@ var _ ports.WorkspaceService = (*Orchestrator)(nil)
 
 // OrchestratorConfig holds the dependencies for creating an Orchestrator.
 type OrchestratorConfig struct {
-	Backend  ports.ComputeBackend
-	Builder  ports.ImageBuilder
-	Vault    ports.SecretVault       // secret vault for placeholder/value lookup
-	TenantID uuid.UUID              // tenant for vault lookups
-	GitHost  ports.GitHostClient
-	Progress *progress.Store
-	Egress   domain.EgressPolicy
-	CAPem    []byte                  // MITM CA certificate to inject into containers
-	Registry ports.WorkspaceRegistry // maps gateway IPs to workspace IDs for CONNECT handler
+	Backend            ports.ComputeBackend
+	Builder            ports.ImageBuilder
+	Vault              ports.SecretVault       // secret vault for placeholder/value lookup
+	TenantID           uuid.UUID               // tenant for vault lookups
+	GitHost            ports.GitHostClient
+	Progress           *progress.Store
+	Egress             domain.EgressPolicy
+	CAPem              []byte                  // MITM CA certificate to inject into containers
+	Registry           ports.WorkspaceRegistry // maps gateway IPs to workspace IDs for CONNECT handler
+	DefaultMaxLifetime time.Duration
+	CloneConcurrency   int
 }
 
 // NewOrchestrator creates a workspace orchestrator.
 func NewOrchestrator(cfg OrchestratorConfig) *Orchestrator {
+	defaultMaxLifetime := cfg.DefaultMaxLifetime
+	if defaultMaxLifetime == 0 {
+		defaultMaxLifetime = 8 * time.Hour
+	}
+	cloneConcurrency := cfg.CloneConcurrency
+	if cloneConcurrency == 0 {
+		cloneConcurrency = 12
+	}
 	o := &Orchestrator{
-		backend:  cfg.Backend,
-		builder:  cfg.Builder,
-		vault:    cfg.Vault,
-		tenantID: cfg.TenantID,
-		gitHost:  cfg.GitHost,
-		progress: cfg.Progress,
-		egress:   cfg.Egress,
-		caPem:    cfg.CAPem,
-		registry: cfg.Registry,
+		backend:            cfg.Backend,
+		builder:            cfg.Builder,
+		vault:              cfg.Vault,
+		tenantID:           cfg.TenantID,
+		gitHost:            cfg.GitHost,
+		progress:           cfg.Progress,
+		egress:             cfg.Egress,
+		caPem:              cfg.CAPem,
+		registry:           cfg.Registry,
+		defaultMaxLifetime: defaultMaxLifetime,
+		cloneConcurrency:   cloneConcurrency,
 	}
 	if o.egress.Enabled {
 		log.Printf("[workspace] network-level egress enforcement enabled (proxy=%s)", o.egress.ProxyAddr)
@@ -325,9 +339,8 @@ func (o *Orchestrator) ActivateRepo(ctx context.Context, tenantID, workspaceID u
 
 	newWSID := uuid.New()
 	now := time.Now().UTC()
-	maxLifetime := 8 * time.Hour
 	cName := containerName(shortName, newWSID)
-	labels := baseLabels(tenantID, newWSID, shortName, now, maxLifetime)
+	labels := baseLabels(tenantID, newWSID, shortName, now, o.defaultMaxLifetime)
 	labels["cordon.spawned-from"] = workspaceID.String()
 	repoJSON, _ := json.Marshal([]domain.RepoConfig{{URL: repoURL, Branch: defaultBranch, Primary: true}})
 	labels["cordon.repos"] = string(repoJSON)
