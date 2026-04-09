@@ -141,21 +141,17 @@ This also blocks multi-backend support: Docker labels, Azure resource tags, and 
 
 ## Real Authentication (OIDC / Entra ID)
 
-**Status:** Deferred
+**Status:** Done (Phase 1.3)
 **Impact:** Security — anyone who can reach port 8443 can use the system
 
-Currently single-tenant with a static tenant ID. No user authentication, no identity provider integration.
-
-**Planned approach:** OIDC integration with Entra ID (Azure AD) as the primary provider. Device-bound tokens, short TTLs, Conditional Access policies. Each developer gets their own tenant context. Supports the user settings system needed for AI config parity and git identity preferences.
+Implemented as JWT signature verification with BYOIDP (Bring Your Own Identity Provider). Cordon verifies JWT tokens from any OIDC-compatible provider via JWKS endpoint. Three auth modes: `static` (dev, requires `CORDON_INSECURE=true`), `token` (API keys), `jwt` (production). Configurable tenant claim for provider compatibility (e.g., Entra ID uses `tid`).
 
 ## Vault Integration (Azure Key Vault / Managed Identity)
 
-**Status:** Deferred
+**Status:** Done (Phase 1.2) — encrypted PostgreSQL vault
 **Impact:** Security — secrets stored in env vars on the Cordon server
 
-The secret vault is currently in-memory, loaded from environment variables. Secrets exist in plaintext on the server's process.
-
-**Planned approach:** Integration with Azure Key Vault using Managed Identity. The Cordon server fetches secrets from Key Vault at runtime — no secrets in env vars, config files, or on disk. Supports automatic rotation. For non-Azure deployments, HashiCorp Vault as an alternative backend.
+Implemented as an AES-256-GCM encrypted PostgreSQL-backed vault. Secrets are encrypted at rest in the database. The `MemoryVault` is retained for local development only. Cloud vault backends (Azure Key Vault, HashiCorp Vault) can be added as alternative `SecretVault` implementations.
 
 ## SQL Classifier Improvements
 
@@ -177,12 +173,10 @@ Even when a query is allowed, the result set may contain sensitive data (emails,
 
 ## Persistent Approval Grants
 
-**Status:** Deferred
+**Status:** Done (Phase 1.5)
 **Impact:** UX — approval grants (session/pattern-based) are lost on server restart
 
-When a user approves a T3 operation with "session" or "pattern" scope, that grant is stored in memory and lost on restart. The developer has to re-approve the same operations after every server restart.
-
-**Planned approach:** Persist grants to PostgreSQL alongside audit entries. Grants have TTLs and are scoped to tenant + workspace. Expired grants are cleaned up automatically.
+Implemented: `approval_grants` table in PostgreSQL. Grants persist across server restarts with TTL and scope (one-time, session, pattern). Expired grants filtered at query time via partial index.
 
 ## Investigation Workspaces
 
@@ -212,12 +206,10 @@ When debugging cross-service issues, developers often don't know which repos are
 
 ## Idle Timeout Enforcement
 
-**Status:** Deferred
+**Status:** Done
 **Impact:** Containers run indefinitely until max lifetime or manual destroy
 
-The `IdleTimeout` field exists in `WorkspaceConfig` (default 15 min) but is not enforced.
-
-**Planned approach:** Background goroutine that periodically checks last activity time (from terminal relay or exec calls). Suspend idle containers after timeout. Notify via WebSocket before suspending.
+Implemented: `Reaper` goroutine checks workspace activity periodically. Suspends idle containers after configurable timeout (`CORDON_IDLE_TIMEOUT`, default 15m). Destroys workspaces after max lifetime (`CORDON_MAX_LIFETIME`, default 8h). `LifecycleManager` tracks last activity and TTL extensions.
 
 ## PostgreSQL Wire Protocol Proxy
 

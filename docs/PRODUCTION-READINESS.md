@@ -6,11 +6,11 @@ Reference: [Security Model](../README.md#security-model--defense-in-depth) defin
 
 ---
 
-## Phase 0: Foundation
+## Phase 0: Foundation ✅
 
 Structural changes that unblock everything else. No new features — just moving from "it works" to "it's maintainable."
 
-### 0.1 Centralized Configuration
+### 0.1 Centralized Configuration ✅
 
 **Problem:** 14+ timeout/limit values hardcoded and duplicated across `cmd/server/main.go`, handlers, helpers. Changing a timeout requires a code change, recompile, redeploy.
 
@@ -24,7 +24,7 @@ Structural changes that unblock everything else. No new features — just moving
 
 **Validates:** `make test` passes. All previously hardcoded values are configurable via env vars.
 
-### 0.2 Structured Logging
+### 0.2 Structured Logging ✅
 
 **Problem:** 100+ `log.Printf` calls with inconsistent prefixes. No request IDs, no tenant context, no level filtering. Can't correlate a workspace creation failure with the API request that triggered it.
 
@@ -56,11 +56,11 @@ Structural changes that unblock everything else. No new features — just moving
 
 ---
 
-## Phase 1: Security Hardening
+## Phase 1: Security Hardening ✅
 
 Make the 7 defense layers production-grade. Each item hardens one or more layers from the security model.
 
-### 1.1 Reliable Audit Trail (Layer 6)
+### 1.1 Reliable Audit Trail (Layer 6) ✅ (partial)
 
 **Problem:** `writeAudit()` silently drops errors. Security-critical events can be lost under load or during DB issues.
 
@@ -76,7 +76,7 @@ Make the 7 defense layers production-grade. Each item hardens one or more layers
 
 **Dependency:** 0.2 (structured logging for the WAL)
 
-### 1.2 Real Vault Backend (Layer 5)
+### 1.2 Real Vault Backend (Layer 5) ✅ (AES-256-GCM encrypted PostgreSQL vault)
 
 **Problem:** `MemoryVault` loaded from env vars. Secrets in plaintext in server process memory. No rotation, no encryption at rest.
 
@@ -92,7 +92,7 @@ Make the 7 defense layers production-grade. Each item hardens one or more layers
 
 **Dependency:** 0.1 (vault config in centralized config struct)
 
-### 1.3 Authentication (Layer: Tenant Isolation)
+### 1.3 Authentication (Layer: Tenant Isolation) ✅ (JWT with BYOIDP)
 
 **Problem:** No real auth. Static tenant ID. Anyone reaching port 8443 is the default tenant.
 
@@ -109,7 +109,7 @@ Make the 7 defense layers production-grade. Each item hardens one or more layers
 
 **Dependency:** 0.3 (user settings need persistent store)
 
-### 1.4 Container Hardening (Layer 7)
+### 1.4 Container Hardening (Layer 7) ✅
 
 **Problem:** Containers run with default Docker capabilities. No seccomp profile, no AppArmor. Default caps include `CAP_NET_RAW` (packet crafting) and `CAP_SYS_PTRACE` (debugging other processes).
 
@@ -125,7 +125,7 @@ Make the 7 defense layers production-grade. Each item hardens one or more layers
 
 **Dependency:** None. Can be done in parallel with other Phase 1 work.
 
-### 1.5 Persistent Approval Grants (Layer 4)
+### 1.5 Persistent Approval Grants (Layer 4) ✅
 
 **Problem:** Session/pattern approval grants stored in memory, lost on restart.
 
@@ -142,11 +142,11 @@ Make the 7 defense layers production-grade. Each item hardens one or more layers
 
 ---
 
-## Phase 2: Provider Abstraction
+## Phase 2: Provider Abstraction ✅
 
 Decouple the application layer from Docker so that Azure Container Instances, Firecracker, or Kubernetes can be added as backends without touching business logic.
 
-### 2.1 Clean Application/Infrastructure Boundary
+### 2.1 Clean Application/Infrastructure Boundary ✅
 
 **Problem:** Application layer (`workspace/`) reaches through to Docker-specific behaviors: label access, `hostname -I` exec, Docker binary stream header parsing, network naming conventions.
 
@@ -161,7 +161,7 @@ Decouple the application layer from Docker so that Azure Container Instances, Fi
 
 **Dependency:** 0.3 (workspace store replaces label reads)
 
-### 2.2 Backend-Agnostic Egress Enforcement
+### 2.2 Backend-Agnostic Egress Enforcement ✅
 
 **Problem:** Egress enforcement uses Docker-specific haproxy gateway containers. Azure and Firecracker need completely different isolation mechanisms.
 
@@ -177,7 +177,7 @@ Decouple the application layer from Docker so that Azure Container Instances, Fi
 
 **Dependency:** 0.1 (config), 2.1 (clean boundaries)
 
-### 2.3 Per-Workspace Egress Policies (Layer 2)
+### 2.3 Per-Workspace Egress Policies (Layer 2) ✅
 
 **Problem:** Egress allowlist is global. Can't give workspace A access to different hosts than workspace B.
 
